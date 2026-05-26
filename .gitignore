@@ -10,6 +10,13 @@ lerna-debug.log*
 # Yandex Music Versions
 .versions
 
+# Compiled 7za wrapper (см. src/patcher/wincodesign-workaround.ts)
+# Большой файл (~110 МБ из-за bundled bun runtime), пересобирается локально
+scripts/7za-wrapper.exe
+
+# Claude Code local state
+.claude/
+
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 

@@ -114,6 +114,12 @@ If you add an alias, update both.
 - `.env` defines `VITE_MOD_VERSION` (shown in the sidebar header), `AUTO_OPEN_DEVTOOLS` (read by the patcher, **not** by Vite — controls whether `index.js` is patched to auto-open DevTools), and `VITE_PUBLIC_SENTRY_DSN`.
 - Sentry is initialized but only sends events when `window.__yandexMusicModAnalyticsEnabled` is truthy (opt-in).
 
+## winCodeSign workaround (Windows-only)
+
+`electron-builder` падает на этапе распаковки `winCodeSign-2.6.0.7z` если запущен без admin / без Developer Mode: внутри лежат darwin symlink'и (`libcrypto.dylib`, `libssl.dylib`), которые требуют `SeCreateSymbolicLinkPrivilege`. `src/patcher/wincodesign-workaround.ts` подменяет `7za.exe` в `bunx`-кэш папке electron-builder'а на bun-compiled обёртку (`scripts/7za-wrapper.ts`), которая исключает эти файлы из распаковки. Обёртка собирается через `bun build --compile`, занимает ~110 МБ (бандленный bun runtime), поэтому в `.gitignore`.
+
+При первом запуске `bun start` обёртка соберётся автоматически (см. `applyWincodesignWorkaround()`). Если апстрим починит проблему — workaround можно убрать целиком вместе с `scripts/7za-wrapper.ts` и `src/patcher/wincodesign-workaround.ts`.
+
 ## Common pitfalls
 
 - A new Yandex Music version breaks regex matches in `patcher.ts` step 5. The fix is updating regexes, not the rest of the pipeline.

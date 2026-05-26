@@ -7,6 +7,7 @@ const _7z = require("7zip-min");
 import { $ } from "bun";
 
 import { downloadBuild } from "./api";
+import { applyWincodesignWorkaround } from "./wincodesign-workaround";
 import type { AppBuild } from "~/types/AppBuild";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -446,6 +447,13 @@ export async function processBuild(build: AppBuild) {
   await $`bun install`.cwd(buildModdedDir);
 
   // await $`bunx electron .`.cwd(buildModdedDir);
+
+  // Workaround: на Windows без Developer Mode и без прав администратора
+  // electron-builder падает на распаковке winCodeSign-2.6.0.7z из-за того что
+  // в архиве лежат darwin symlink-файлы (libcrypto.dylib, libssl.dylib), которые
+  // невозможно создать без SeCreateSymbolicLinkPrivilege. Эти файлы для Windows
+  // сборки бесполезны. Применяем 7za-обёртку, которая исключает их при распаковке.
+  await applyWincodesignWorkaround();
 
   await $`bunx electron-builder`.cwd(buildModdedDir);
 

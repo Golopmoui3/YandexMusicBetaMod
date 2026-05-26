@@ -84,7 +84,7 @@ electron.ipcMain.handle("yandexMusicMod.selectDownloadFolder", async (_ev) => {
 // window API - открытие папки для загрузки треков
 electron.ipcMain.handle("yandexMusicMod.openFolder", async (_ev, folderPath) => {
   try {
-    await electron.openPath(folderPath);
+    await electron.shell.openPath(folderPath);
     return { success: true };
   } catch (error) {
     console.error("Failed to open folder:", error);
@@ -257,7 +257,7 @@ electron.ipcMain.handle(
 );
 
 // window API - открытие папки для загрузки треков
-electron.ipcMain.on("yandexMusicMod.openDownloadDirectory", (_ev) => {
+electron.ipcMain.on("yandexMusicMod.openDownloadDirectory", async (_ev) => {
   let saveFolder;
   if (process.platform === "win32") {
     saveFolder = process.env.USERPROFILE + "\\YandexMod Download";
@@ -265,18 +265,14 @@ electron.ipcMain.on("yandexMusicMod.openDownloadDirectory", (_ev) => {
     saveFolder = (process.env.HOME || process.env.USERPROFILE) + "/YandexMod Download";
   }
 
-  if (customDownloadPath) {
-    saveFolder = customDownloadPath;
-  } else {
-    try {
-      const settings = JSON.parse(fs.readFileSync(settingsFilePath, "utf8"));
-      saveFolder = settings.downloadFolderPath || saveFolder;
-    } catch (e) {
-      console.log("failed to parse settings", e)
-    }
+  try {
+    const settings = JSON.parse(fs.readFileSync(settingsFilePath, "utf8"));
+    saveFolder = settings.downloadFolderPath || saveFolder;
+  } catch (e) {
+    console.log("failed to parse settings", e);
   }
 
-  await electron.openPath(saveFolder)
+  await electron.shell.openPath(saveFolder);
 });
 
 // window API - универсальный axios запрос

@@ -1,4 +1,4 @@
-import { getStableBuild, downloadBuild } from "./api";
+import { getStableBuild } from "./api";
 import { processBuild } from "./patcher";
 
 const stableBuild = await getStableBuild();

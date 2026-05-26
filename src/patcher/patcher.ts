@@ -66,7 +66,7 @@ export async function processBuild(build: AppBuild) {
   const appAsarPath = path.resolve(path.join(extractDir, "resources", "app.asar"));
   const appIconPath = path.resolve(path.join(extractDir, "resources", "assets", "icon.ico"));
 
-  if (appAsarPath) {
+  if (fs.existsSync(appAsarPath)) {
     logProgress(`✔️   Found app.asar`);
   } else {
     logProgress(`❌ app.asar was not found inside the extracted installer for ${build.version}`);

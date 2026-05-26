@@ -47,9 +47,7 @@ export function initFetchInterceptor() {
     if (request && request.url && request.url.startsWith("https://api.music.yandex.net"))
       return yandexApiFetch(...args);
 
-    try {
-      return originalFetch(...args);
-    } catch (e) {}
+    return originalFetch(...args);
   };
 }
 

@@ -71,7 +71,7 @@ async function updateActivity() {
       largeImageKey: playerStateData.trackMeta.coverUri
         ? `https://${playerStateData.trackMeta.coverUri.replaceAll("%%", "300x300")}`
         : undefined,
-      largeImageKey: playerStateData.trackMeta.coverUri
+      smallImageKey: playerStateData.trackMeta.coverUri
         ? `https://${playerStateData.trackMeta.coverUri.replaceAll("%%", "100x100")}`
         : undefined,
       state: playerStateData.trackMeta.artists.map((a) => a.name).join(", "),

@@ -16,10 +16,5 @@ electron.contextBridge.exposeInMainWorld("yandexMusicMod", {
   axios: (config: any) => electron.ipcRenderer.invoke("yandexMusicMod.axios", config),
 });
 
-// Register Ctrl+Shift+I to open DevTools
-electron.globalShortcut.register("CommandOrControl+Shift+I", () => {
-  const focusedWindow = electron.BrowserWindow.getFocusedWindow();
-  if (focusedWindow) {
-    focusedWindow.webContents.toggleDevTools();
-  }
-});
+// Ctrl+Shift+I регистрируется в main-процессе через index.js (см. patcher.ts).
+// В preload эти API недоступны — globalShortcut и BrowserWindow это main-only.

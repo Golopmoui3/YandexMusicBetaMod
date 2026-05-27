@@ -3,31 +3,94 @@ import { z } from "zod";
 import { ok, err, Result } from "neverthrow";
 import * as Sentry from "@sentry/react";
 
-const PLAYER_SELECTOR = 'section[data-test-id="PLAYERBAR_DESKTOP"]';
-const PLAY_BUTTON_SELECTOR = 'button[data-test-id="PLAY_BUTTON"]';
-const PAUSE_BUTTON_SELECTOR = 'button[data-test-id="PAUSE_BUTTON"]';
+// В production-билде Яндекс Музыки атрибуты data-test-id не выставляются
+// (см. window.__CONFIG_ENV__ === "production" в bundler-коде).
+// Поэтому ищем плеер через React Fiber: единственный <section>, у которого
+// в fiber-дереве есть проп entityMeta — это и есть плеер.
 
+// Старые селекторы — для случая, когда атрибут всё-таки есть (dev-сборки).
+const LEGACY_PLAYER_SELECTOR = 'section[data-test-id="PLAYERBAR_DESKTOP"]';
+const PLAY_BUTTON_ARIA = ["player-actions.play"];
+const PAUSE_BUTTON_ARIA = ["player-actions.pause"];
+
+let cachedPlayer: Element | null = null;
 let hasAdsInPlayer = false;
 
+function isPlayerSection(el: Element): boolean {
+  try {
+    const fiber = searchProperty(el as HTMLElement, "entityMeta");
+    return !!fiber;
+  } catch {
+    return false;
+  }
+}
+
+function findPlayer(): Element | null {
+  // 1) Проверяем кэш
+  if (cachedPlayer && document.contains(cachedPlayer) && isPlayerSection(cachedPlayer)) {
+    return cachedPlayer;
+  }
+
+  // 2) Старый путь — data-test-id (если вдруг работает)
+  const legacy = document.querySelector(LEGACY_PLAYER_SELECTOR);
+  if (legacy) {
+    cachedPlayer = legacy;
+    return legacy;
+  }
+
+  // 3) Перебор всех <section> с поиском fiber-пропа entityMeta
+  const sections = document.querySelectorAll("section");
+  for (const section of Array.from(sections)) {
+    if (isPlayerSection(section)) {
+      cachedPlayer = section;
+      return section;
+    }
+  }
+
+  return null;
+}
+
+function findPlayPauseButton(player: Element): { kind: "play" | "pause" | null; button: Element | null } {
+  // Сначала через data-test-id (если есть)
+  const playByTestId = player.querySelector('button[data-test-id="PLAY_BUTTON"]');
+  if (playByTestId) return { kind: "play", button: playByTestId };
+  const pauseByTestId = player.querySelector('button[data-test-id="PAUSE_BUTTON"]');
+  if (pauseByTestId) return { kind: "pause", button: pauseByTestId };
+
+  // В production: ищем кнопку по содержимому иконки (svg variant "play"/"pause")
+  // или по fiber-пропам.
+  const buttons = player.querySelectorAll("button");
+  for (const btn of Array.from(buttons)) {
+    const icon = btn.querySelector("svg, use");
+    const href = icon?.getAttribute?.("href") || icon?.getAttribute?.("xlink:href") || "";
+    const cls = (icon?.getAttribute?.("class") || "") + " " + (btn.className || "");
+    if (/pause/i.test(href) || /pause/i.test(cls)) {
+      return { kind: "pause", button: btn };
+    }
+    if (/(^|[^a-z])play([^a-z]|$)/i.test(href) || /(^|[^a-z])play([^a-z]|$)/i.test(cls)) {
+      return { kind: "play", button: btn };
+    }
+  }
+
+  return { kind: null, button: null };
+}
+
 export function isPlaying(): Result<boolean, string> {
-  const player = document.querySelector(PLAYER_SELECTOR);
+  const player = findPlayer();
   if (!player) {
     return err("Player element not found in DOM");
   }
 
-  const playButton = player.querySelector(PLAY_BUTTON_SELECTOR);
-  const pauseButton = player.querySelector(PAUSE_BUTTON_SELECTOR);
-
-  if (!pauseButton && !playButton) {
+  const { kind } = findPlayPauseButton(player);
+  if (!kind) {
     return err("Neither pause nor play button found in player");
   }
 
-  // If pause button exists, the player is currently playing
-  return ok(!!pauseButton);
+  return ok(kind === "pause");
 }
 
 export function getProgress(): Result<{ duration: number; progress: number; position: number }, string> {
-  const player = document.querySelector(PLAYER_SELECTOR);
+  const player = findPlayer();
   if (!player) {
     return err("Player element not found in DOM");
   }
@@ -57,7 +120,7 @@ export function getProgress(): Result<{ duration: number; progress: number; posi
 }
 
 export function getTrackMeta(): Result<any, string> {
-  const player = document.querySelector(PLAYER_SELECTOR);
+  const player = findPlayer();
   if (!player) {
     return err("Player element not found in DOM");
   }

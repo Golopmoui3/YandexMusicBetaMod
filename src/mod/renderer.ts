@@ -1,7 +1,18 @@
+import { initAudioElementTracker } from "~/mod/features/utils/audio-element-tracker";
 import { initFetchInterceptor } from "~/mod/features/utils";
+import { initTrackMetaStore } from "~/mod/features/utils/track-meta-store";
+
+// ВАЖНО: трекер audio-элементов должен быть инициализирован ДО любого другого
+// кода — он monkey-patch'ит document.createElement и должен сработать
+// раньше чем Yandex Music создаст первый <audio>.
+initAudioElementTracker();
 
 // Инициализация мода utils для перехвата запросов к yandex api
 initFetchInterceptor();
+
+// Track meta store — слушает /get-file-info и подтягивает мета через /tracks.
+// Должен быть после initFetchInterceptor (он использует onYandexApiRequest).
+initTrackMetaStore();
 
 // Инициализация мода на разблокировку плюса
 import "./features/plus-unlocker";

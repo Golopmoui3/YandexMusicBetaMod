@@ -54,17 +54,42 @@ export async function applyWincodesignWorkaround(): Promise<void> {
     return;
   }
 
+  // Размер обёртки используется чтобы детектировать "7za.exe уже подменён".
+  // Реальный 7za.exe ~1.5MB; bun-compiled обёртка ~110MB.
+  const wrapperSize = fs.statSync(wrapperPath).size;
+
   for (const target7zaPath of candidates) {
     const dir = path.dirname(target7zaPath);
     const realExePath = path.join(dir, "7za-real.exe");
 
+    const currentIsWrapper = fs.statSync(target7zaPath).size === wrapperSize;
+
     // Сохраняем оригинал если ещё не сохранён
     if (!fs.existsSync(realExePath)) {
-      fs.copyFileSync(target7zaPath, realExePath);
+      if (currentIsWrapper) {
+        // 7za.exe уже обёртка от прошлого билда, а 7za-real.exe утерян
+        // (например temp папка bunx пересоздалась). Берём оригинал из локального
+        // bun cache или из node_modules данного репо.
+        const fallbacks = [
+          path.join(projectRoot, "node_modules", "7zip-bin", "win", "x64", "7za.exe"),
+          path.join(os.homedir(), ".bun", "install", "cache", "7zip-bin@5.1.1@@@1", "win", "x64", "7za.exe"),
+          path.join(os.homedir(), ".bun", "install", "cache", "7zip-bin@5.2.0@@@1", "win", "x64", "7za.exe"),
+        ];
+        const fallback = fallbacks.find((p) => fs.existsSync(p) && fs.statSync(p).size !== wrapperSize);
+        if (!fallback) {
+          console.log(`⚠️  Не удалось найти оригинальный 7za.exe для восстановления в ${dir}`);
+          continue;
+        }
+        fs.copyFileSync(fallback, realExePath);
+      } else {
+        fs.copyFileSync(target7zaPath, realExePath);
+      }
     }
 
-    // Подменяем 7za.exe на нашу обёртку
-    fs.copyFileSync(wrapperPath, target7zaPath);
+    // Подменяем 7za.exe на нашу обёртку (если ещё не подменён)
+    if (!currentIsWrapper) {
+      fs.copyFileSync(wrapperPath, target7zaPath);
+    }
     console.log(`✔️   7za-wrapper применён: ${target7zaPath}`);
   }
 }

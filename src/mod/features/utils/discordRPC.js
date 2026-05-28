@@ -2,9 +2,9 @@ const { BrowserWindow } = require("electron");
 const { Client } = require("@xhayper/discord-rpc");
 
 const CLIENT_ID = "1283109459463377011";
-const ACTIVITY_COOLDOWN = 10 * 1000;
 
-let lastActivityChanged = Date.now();
+let lastTrackId = null;
+let lastIsPlaying = null;
 let client;
 
 function initRpc() {
@@ -38,8 +38,6 @@ function initRpc() {
 async function updateActivity() {
   setTimeout(updateActivity, 500);
 
-  if (lastActivityChanged + ACTIVITY_COOLDOWN > Date.now()) return;
-
   if (!client.user) return;
 
   try {
@@ -47,21 +45,36 @@ async function updateActivity() {
 
     // Discord RPC не включен
     if (!playerState.enabled) {
-      client.user.clearActivity();
+      if (lastTrackId !== null) {
+        client.user.clearActivity();
+        lastTrackId = null;
+        lastIsPlaying = null;
+      }
       return;
     }
 
     const playerStateData = playerState.data;
 
-    if (!playerStateData.isPlaying) {
-      client.user.clearActivity();
+    if (!playerStateData || !playerStateData.isPlaying) {
+      if (lastIsPlaying !== false) {
+        client.user.clearActivity();
+        lastIsPlaying = false;
+        lastTrackId = null;
+      }
       return;
     }
+
+    const currentTrackId = playerStateData.trackMeta?.id;
 
     const startTimestamp = Math.round(Date.now() - playerStateData.playback.position * 1000);
     const endTimestamp = Math.round(
       Date.now() + (playerStateData.playback.duration - playerStateData.playback.position) * 1000,
     );
+
+    const firstArtist = playerStateData.trackMeta.artists?.[0];
+    const artistAvatar = firstArtist?.avatarUri
+      ? `https://${firstArtist.avatarUri.replaceAll("%%", "100x100")}`
+      : undefined;
 
     const rpcRequest = {
       type: 2,
@@ -71,9 +84,9 @@ async function updateActivity() {
       largeImageKey: playerStateData.trackMeta.coverUri
         ? `https://${playerStateData.trackMeta.coverUri.replaceAll("%%", "300x300")}`
         : undefined,
-      smallImageKey: playerStateData.trackMeta.coverUri
-        ? `https://${playerStateData.trackMeta.coverUri.replaceAll("%%", "100x100")}`
-        : undefined,
+      largeImageText: playerStateData.trackMeta.albums?.[0]?.title || undefined,
+      smallImageKey: artistAvatar,
+      smallImageText: firstArtist?.name || undefined,
       state: playerStateData.trackMeta.artists.map((a) => a.name).join(", "),
       startTimestamp: startTimestamp,
       endTimestamp: endTimestamp,
@@ -94,8 +107,8 @@ async function updateActivity() {
     }
 
     client.user.setActivity(rpcRequest);
-
-    lastActivityChanged = Date.now();
+    lastTrackId = currentTrackId;
+    lastIsPlaying = true;
   } catch (ex) {
     console.log("[DISCORD RPC]", ex);
   }

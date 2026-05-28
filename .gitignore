@@ -10,6 +10,9 @@ lerna-debug.log*
 # Yandex Music Versions
 .versions
 
+# Local release artifacts staging (uploaded to GitHub Releases instead)
+release-staging
+
 # Compiled 7za wrapper (см. src/patcher/wincodesign-workaround.ts)
 # Большой файл (~110 МБ из-за bundled bun runtime), пересобирается локально
 scripts/7za-wrapper.exe

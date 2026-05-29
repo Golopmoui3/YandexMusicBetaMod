@@ -11,6 +11,7 @@ import { Alert, AlertDescription } from "@ui/components/ui/alert";
 export function DiscordRPC() {
   const [discordRPCEnabled, setDiscordRPCEnabled] = useState(true);
   const [showModButton, setShowModButton] = useState(true);
+  const [showArtist, setShowArtist] = useState(true);
 
   useEffect(() => {
     (async () => {
@@ -19,6 +20,9 @@ export function DiscordRPC() {
       );
       setShowModButton(
         (await window.yandexMusicMod.getStorageValue("discordRPC/showModButton")) === false ? false : true,
+      );
+      setShowArtist(
+        (await window.yandexMusicMod.getStorageValue("discordRPC/showArtist")) === false ? false : true,
       );
     })();
   }, []);
@@ -57,6 +61,19 @@ export function DiscordRPC() {
           />
           <Label htmlFor="discord-mod-button-toggle" className="cursor-pointer">
             Показывать кнопку YandexMusicMod
+          </Label>
+        </div>
+        <div className="flex items-center gap-3">
+          <Switch
+            id="discord-show-artist-toggle"
+            checked={showArtist}
+            onCheckedChange={(enabled) => {
+              setShowArtist(enabled);
+              window.yandexMusicMod.setStorageValue("discordRPC/showArtist", enabled);
+            }}
+          />
+          <Label htmlFor="discord-show-artist-toggle" className="cursor-pointer">
+            Отображать артиста в Discord
           </Label>
         </div>
       </div>

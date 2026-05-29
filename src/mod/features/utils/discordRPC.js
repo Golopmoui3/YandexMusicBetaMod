@@ -72,8 +72,13 @@ async function updateActivity() {
     );
 
     const firstArtist = playerStateData.trackMeta.artists?.[0];
-    const artistAvatar = firstArtist?.avatarUri
-      ? `https://${firstArtist.avatarUri.replaceAll("%%", "100x100")}`
+    const showArtist = playerState.showArtist !== false;
+    const artistAvatar =
+      showArtist && firstArtist?.avatarUri
+        ? `https://${firstArtist.avatarUri.replaceAll("%%", "100x100")}`
+        : undefined;
+    const artistsLine = showArtist
+      ? playerStateData.trackMeta.artists.map((a) => a.name).join(", ")
       : undefined;
 
     const rpcRequest = {
@@ -86,8 +91,8 @@ async function updateActivity() {
         : undefined,
       largeImageText: playerStateData.trackMeta.albums?.[0]?.title || undefined,
       smallImageKey: artistAvatar,
-      smallImageText: firstArtist?.name || undefined,
-      state: playerStateData.trackMeta.artists.map((a) => a.name).join(", "),
+      smallImageText: showArtist ? firstArtist?.name || undefined : undefined,
+      state: artistsLine,
       startTimestamp: startTimestamp,
       endTimestamp: endTimestamp,
       buttons: [

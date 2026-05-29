@@ -3,6 +3,7 @@ import * as Sentry from "@sentry/react";
 
 let isRpcEnabled = true;
 let showModButton = true;
+let showArtist = true;
 
 // Функция для получения состояния плеера из окна приложения. Её вызывает main процесс - src\mod\main.js
 window.__getPlayerState = () => {
@@ -18,6 +19,7 @@ window.__getPlayerState = () => {
     return {
       enabled: isRpcEnabled,
       showModButton: showModButton,
+      showArtist: showArtist,
       data: null,
     };
   }
@@ -28,6 +30,7 @@ window.__getPlayerState = () => {
     return {
       enabled: isRpcEnabled,
       showModButton: showModButton,
+      showArtist: showArtist,
       data: null,
     };
   }
@@ -38,6 +41,7 @@ window.__getPlayerState = () => {
     return {
       enabled: isRpcEnabled,
       showModButton: showModButton,
+      showArtist: showArtist,
       data: null,
     };
   }
@@ -45,6 +49,7 @@ window.__getPlayerState = () => {
   return {
     enabled: isRpcEnabled,
     showModButton: showModButton,
+    showArtist: showArtist,
     data: {
       trackMeta: trackMetaRequest.value,
       playback: playbackRequest.value,
@@ -56,9 +61,11 @@ window.__getPlayerState = () => {
 window.yandexMusicMod.onStorageChanged((key: string, value: any) => {
   if (key === "discordRPC/enabled" && value !== isRpcEnabled) isRpcEnabled = value;
   if (key === "discordRPC/showModButton" && value !== showModButton) showModButton = value;
+  if (key === "discordRPC/showArtist" && value !== showArtist) showArtist = value;
 });
 
 (async () => {
   isRpcEnabled = (await window.yandexMusicMod.getStorageValue("discordRPC/enabled")) === false ? false : true;
   showModButton = (await window.yandexMusicMod.getStorageValue("discordRPC/showModButton")) === false ? false : true;
+  showArtist = (await window.yandexMusicMod.getStorageValue("discordRPC/showArtist")) === false ? false : true;
 })();

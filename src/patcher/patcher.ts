@@ -169,7 +169,7 @@ export async function processBuild(build: AppBuild) {
     const privateModules = new Set<string>();
     let match: RegExpExecArray | null;
     while ((match = requirePattern.exec(contents)) !== null) {
-      privateModules.add(match[1]);
+      if (match[1] !== undefined) privateModules.add(match[1]);
     }
     if (privateModules.size === 0) return contents;
 
@@ -186,8 +186,6 @@ export async function processBuild(build: AppBuild) {
     );
     return contents;
   };
-
-  indexJsContents = stubPrivateRequires(indexJsContents, "index.js");
 
   logProgress(`✔️   Done`);
   packageJsonContents.name = "YandexMusicMod";
@@ -237,6 +235,10 @@ export async function processBuild(build: AppBuild) {
   logProgress(`🛠️  Apply patches to index.js`);
 
   let indexJsContents = fs.readFileSync(staticFiles.indexJs, "utf8");
+
+  // Стаб приватных require — до остальных патчей, чтобы упавшие
+  // "Cannot find module" больше не убивали приложение на старте.
+  indexJsContents = stubPrivateRequires(indexJsContents, "index.js");
 
   indexJsContents =
     `

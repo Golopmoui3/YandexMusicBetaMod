@@ -1,0 +1,116 @@
+name: auto-release
+
+# Следит за новой версией Яндекс Музыки. Когда она выходит:
+# 1) собирает мод целиком (скачивание -> патч -> установщик)
+# 2) прикладывает установщик + SHA256 к релизу с тегом app-<версия>
+# 3) коммитит новую версию в LAST_BUILD_VERSION, чтобы не собирать повторно
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      changed: ${{ steps.check.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the latest Yandex Music version
+        id: check
+        run: |
+          VERSION=$(curl -fsSL \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+            https://music-desktop-application.s3.yandex.net/stable/latest.yml \
+            | grep -m1 '^version:' | awk '{print $2}')
+
+          if [ -z "$VERSION" ]; then
+            echo "Could not read the version from latest.yml" >&2
+            exit 1
+          fi
+
+          STORED=$(cat LAST_BUILD_VERSION 2>/dev/null || echo "none")
+          echo "latest: $VERSION | last built: $STORED"
+
+          {
+            echo "version=$VERSION"
+            if [ "$VERSION" != "$STORED" ]; then
+              echo "changed=true"
+            else
+              echo "changed=false"
+            fi
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: check
+    if: needs.check.outputs.changed == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Полный пайплайн: скачать сборку Яндекса, пропатчить, собрать установщик.
+      - name: Build installer
+        run: bun start
+
+      - name: Collect artifacts
+        shell: pwsh
+        run: |
+          $out = "$env:GITHUB_WORKSPACE/artifacts"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          Get-ChildItem -Path .versions -Recurse -Include *.exe,*.yml |
+            Where-Object { $_.FullName -notmatch 'node_modules' } |
+            Copy-Item -Destination $out
+          Get-ChildItem $out
+
+      - name: Checksums
+        shell: pwsh
+        run: |
+          Get-ChildItem ./artifacts/*.exe | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
+            "$hash  $($_.Name)" | Out-File ./artifacts/SHASUMS256.txt -Append
+          }
+          Get-Content ./artifacts/SHASUMS256.txt
+
+      - name: Commit last built version
+        shell: bash
+        run: |
+          echo "${{ needs.check.outputs.version }}" > LAST_BUILD_VERSION
+          git config user.name "Golopmoui3"
+          git config user.email "Golopmoui3@users.noreply.github.com"
+          git add LAST_BUILD_VERSION
+          git commit -m "chore: built for Yandex Music ${{ needs.check.outputs.version }} [skip ci]"
+          git pull --rebase origin master
+          git push
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: app-${{ needs.check.outputs.version }}
+          name: "Яндекс Музыка ${{ needs.check.outputs.version }} — авто-сборка мода"
+          body: |
+            Автоматическая сборка мода поверх последней стабильной версии Яндекс Музыки.
+
+            - Версия приложения: **${{ needs.check.outputs.version }}**
+            - Установщик: `*.exe` из артефактов ниже
+            - Целостность: `SHASUMS256.txt`
+
+            > [!WARNING]
+            > Первый запуск после обновления Яндекса может содержать баги патчера.
+            > Если что-то сломалось — открой issue с логом установщика.
+          files: |
+            artifacts/*.exe
+            artifacts/SHASUMS256.txt

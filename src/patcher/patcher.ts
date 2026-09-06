@@ -142,12 +142,19 @@ export async function processBuild(build: AppBuild) {
   packageJsonContents.dependencies = packageJsonContents.dependencies || {};
   packageJsonContents.devDependencies = packageJsonContents.devDependencies || {};
 
+  // Пакеты, которые невозможно поставить из публичного npm:
+  // - @yandex-chats/signer закрыт у Яндекса целиком;
+  // - @yandex-music-int/* - приватные canary-скопы (появились в >=5.115;
+  //   например electron-certificate-verification@~0.0.1-canary отдаёт 404).
   const bannedDependencies = ["@yandex-chats/signer"];
+  const bannedDependencyScopes = ["@yandex-music-int/"];
+  const isBanned = (key: string) =>
+    bannedDependencies.includes(key) || bannedDependencyScopes.some((scope) => key.startsWith(scope));
   packageJsonContents.dependencies = Object.fromEntries(
-    Object.entries(packageJsonContents.dependencies).filter(([key]) => !bannedDependencies.includes(key)),
+    Object.entries(packageJsonContents.dependencies).filter(([key]) => !isBanned(key)),
   );
   packageJsonContents.devDependencies = Object.fromEntries(
-    Object.entries(packageJsonContents.devDependencies).filter(([key]) => !bannedDependencies.includes(key)),
+    Object.entries(packageJsonContents.devDependencies).filter(([key]) => !isBanned(key)),
   );
   packageJsonContents.name = "YandexMusicMod";
   packageJsonContents.author = "Stephanzion [github.com/Stephanzion]";

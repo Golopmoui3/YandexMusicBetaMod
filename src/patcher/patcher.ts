@@ -165,7 +165,7 @@ export async function processBuild(build: AppBuild) {
   // активируется, вместо падения всего приложения.
   const stubPrivateRequires = (contents: string, fileName: string) => {
     const requirePattern =
-      /require\("@yandex-music-int\/([a-zA-Z0-9_-]+)"\)/g;
+      /require\(["']@yandex-music-int\/([a-zA-Z0-9_-]+)["']\)/g;
     const privateModules = new Set<string>();
     let match: RegExpExecArray | null;
     while ((match = requirePattern.exec(contents)) !== null) {
@@ -176,10 +176,14 @@ export async function processBuild(build: AppBuild) {
     for (const name of privateModules) {
       // Любое свойство заглушки — no-op функция, любой вызов — undefined:
       // бандл лишь настраивает verification-хуки, и их отключение безопасно.
-      contents = contents.replaceAll(
-        `require("@yandex-music-int/${name}")`,
-        `/* yandexMusicMod: private module stubbed out */ ((() => { const noop = () => {}; const handler = { get: (t, p) => p === "setupCertificateVerificationCoordinator" ? noop : noop, apply: () => undefined }; return new Proxy({}, handler); })()) /* @yandex-music-int/${name} */`,
-      );
+      // Кавычки в реальном бандле бывают и одинарные (сырое минифицированное
+      // событие от Яндекса), и двойные (после Prettier) — заменяем оба варианта.
+      for (const quote of ["'", '"']) {
+        contents = contents.replaceAll(
+          `require(${quote}@yandex-music-int/${name}${quote})`,
+          `/* yandexMusicMod: private module stubbed out */ ((() => { const noop = () => {}; const handler = { get: () => noop, apply: () => undefined }; return new Proxy({}, handler); })()) /* @yandex-music-int/${name} */`,
+        );
+      }
     }
     logProgress(
       `🛠️  Stubbed private requires in ${fileName}: ${[...privateModules].join(", ")}`,
@@ -484,6 +488,18 @@ export async function processBuild(build: AppBuild) {
   logProgress(`🛠️  Prettify all files in ${buildModdedDir}`);
 
   await prettifyDirectory(buildModdedDir);
+
+  // Второй проход стаба — после Prettier: на сыром минифицированном index.js
+  // от Яндекса регэксп с двойными кавычками ничего не находит (там одинарные),
+  // а Prettier нормализует кавычки на двойные уже ПОСЛЕ стаба. Поэтому в
+  // релизе v2.9.2 застабленного require не оказалось. Здесь Prettier уже
+  // отформатировал файл (кавычки теперь двойные) — добиваем то, что уцелело.
+  indexJsContents = fs.readFileSync(staticFiles.indexJs, "utf8");
+  indexJsContents = stubPrivateRequires(indexJsContents, "index.js (post-prettier)");
+  preloadJsContents = fs.readFileSync(staticFiles.preloadJs, "utf8");
+  preloadJsContents = stubPrivateRequires(preloadJsContents, "preload.js (post-prettier)");
+  fs.writeFileSync(staticFiles.indexJs, indexJsContents);
+  fs.writeFileSync(staticFiles.preloadJs, preloadJsContents);
 
   logProgress(`✔️   Done`);
 

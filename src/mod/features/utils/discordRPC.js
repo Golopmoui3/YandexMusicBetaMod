@@ -43,6 +43,10 @@ async function updateActivity() {
   try {
     const playerState = await GetAppPlayerState();
 
+    // Окно могло быть закрыто/уничтожено - executeJavaScript вернёт undefined.
+    // Без guard'а сюда каждый тик падает исключение и засоряет консоль.
+    if (!playerState) return;
+
     // Discord RPC не включен
     if (!playerState.enabled) {
       if (lastTrackId !== null) {

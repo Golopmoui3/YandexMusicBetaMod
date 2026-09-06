@@ -156,6 +156,40 @@ export async function processBuild(build: AppBuild) {
   packageJsonContents.devDependencies = Object.fromEntries(
     Object.entries(packageJsonContents.devDependencies).filter(([key]) => !isBanned(key)),
   );
+
+  // Вычистить приватные зависимости из package.json недостаточно: бандл
+  // Яндекс.Музыки содержит require("@yandex-music-int/...") в index.js, и
+  // Electron падает при старте с "Cannot find module" (модуль приватный,
+  // из публичного npm не ставится). Подменяем такие require на no-op
+  // заглушку через Proxy: проверка сертификатов при этом просто не
+  // активируется, вместо падения всего приложения.
+  const stubPrivateRequires = (contents: string, fileName: string) => {
+    const requirePattern =
+      /require\("@yandex-music-int\/([a-zA-Z0-9_-]+)"\)/g;
+    const privateModules = new Set<string>();
+    let match: RegExpExecArray | null;
+    while ((match = requirePattern.exec(contents)) !== null) {
+      privateModules.add(match[1]);
+    }
+    if (privateModules.size === 0) return contents;
+
+    for (const name of privateModules) {
+      // Любое свойство заглушки — no-op функция, любой вызов — undefined:
+      // бандл лишь настраивает verification-хуки, и их отключение безопасно.
+      contents = contents.replaceAll(
+        `require("@yandex-music-int/${name}")`,
+        `/* yandexMusicMod: private module stubbed out */ ((() => { const noop = () => {}; const handler = { get: (t, p) => p === "setupCertificateVerificationCoordinator" ? noop : noop, apply: () => undefined }; return new Proxy({}, handler); })()) /* @yandex-music-int/${name} */`,
+      );
+    }
+    logProgress(
+      `🛠️  Stubbed private requires in ${fileName}: ${[...privateModules].join(", ")}`,
+    );
+    return contents;
+  };
+
+  indexJsContents = stubPrivateRequires(indexJsContents, "index.js");
+
+  logProgress(`✔️   Done`);
   packageJsonContents.name = "YandexMusicMod";
   packageJsonContents.author = "Stephanzion [github.com/Stephanzion]";
   packageJsonContents.build = {
@@ -395,6 +429,8 @@ export async function processBuild(build: AppBuild) {
     `\n\n// yandexMusicMod preload.js\n(async () => {
         ${fs.readFileSync(path.join(modCompiledDir, "preload.js"), "utf8")}
       })();`;
+
+  preloadJsContents = stubPrivateRequires(preloadJsContents, "preload.js");
 
   indexJsContents += `\n\n// yandexMusicMod main.js\n(async () => { 
         ${fs.readFileSync(modMainScript, "utf8")}

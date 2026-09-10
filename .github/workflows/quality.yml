@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
 
 jobs:
   source-checks:
@@ -18,5 +19,29 @@ jobs:
         with:
           bun-version: latest
       - run: bun install --frozen-lockfile
-      - run: bun run typecheck
-      - run: bun run ui:build
+
+      - name: Type-check
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          bun run typecheck 2>&1 | tee typecheck.log
+          STATUS=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$STATUS" -ne 0 ] && [ "${{ github.event_name }}" = "pull_request" ]; then
+            {
+              echo "## TypeScript check failed"
+              echo
+              echo '```text'
+              sed -n '1,220p' typecheck.log
+              echo '```'
+            } > typecheck-comment.md
+            gh pr comment "${{ github.event.pull_request.number }}" --body-file typecheck-comment.md
+          fi
+
+          exit "$STATUS"
+
+      - name: Build UI
+        run: bun run ui:build

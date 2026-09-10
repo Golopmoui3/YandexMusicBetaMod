@@ -7,7 +7,9 @@
     "start": "bun ./src/patcher/index.ts",
     "ui:dev": "bun ./scripts/debug-copy-ui.js",
     "ui:build": "vite build",
-    "prettier:dev": "bun ./scripts/debug-prettier.js"
+    "prettier:dev": "bun ./scripts/debug-prettier.js",
+    "typecheck": "tsc --noEmit",
+    "check": "bun run typecheck && bun run ui:build"
   },
   "peerDependencies": {
     "typescript": "^5.9.3",

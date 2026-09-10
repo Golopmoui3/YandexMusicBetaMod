@@ -1,13 +1,32 @@
-import path from "path";
+import fs from "node:fs";
+import path from "node:path";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, loadEnv } from "vite";
 
+function resolveModVersion(): string {
+  const injectedVersion = process.env.VITE_MOD_VERSION?.trim();
+  if (injectedVersion) return injectedVersion;
+
+  try {
+    const storedVersion = fs.readFileSync(path.resolve(process.cwd(), "LAST_BUILD_VERSION"), "utf8").trim();
+    if (storedVersion) return storedVersion;
+  } catch {
+    // Local UI-only development can run before the first complete build.
+  }
+
+  return "dev";
+}
+
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd());
+  const modVersion = resolveModVersion();
 
   return {
     base: env.VITE_BASE_URL ?? "./",
+    define: {
+      "import.meta.env.VITE_MOD_VERSION": JSON.stringify(modVersion),
+    },
     plugins: [react(), tailwindcss()],
     esbuild: {
       legalComments: "none",
@@ -32,9 +51,7 @@ export default defineConfig(({ mode }) => {
           entryFileNames: "renderer.js",
           chunkFileNames: "[name].js",
           assetFileNames: (assetInfo) => {
-            if (assetInfo.name && assetInfo.name.endsWith(".css")) {
-              return "renderer.css";
-            }
+            if (assetInfo.name && assetInfo.name.endsWith(".css")) return "renderer.css";
             return "[name].[ext]";
           },
         },

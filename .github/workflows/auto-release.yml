@@ -1,10 +1,5 @@
 name: auto-release
 
-# Следит за новой версией Яндекс Музыки. Когда она выходит:
-# 1) собирает мод целиком (скачивание -> патч -> установщик)
-# 2) прикладывает установщик + SHA256 к релизу с тегом app-<версия>
-# 3) коммитит новую версию в LAST_BUILD_VERSION, чтобы не собирать повторно
-
 on:
   schedule:
     - cron: "0 */6 * * *"
@@ -12,6 +7,10 @@ on:
 
 permissions:
   contents: write
+
+concurrency:
+  group: auto-release-master
+  cancel-in-progress: false
 
 jobs:
   check:
@@ -24,28 +23,28 @@ jobs:
 
       - name: Read the latest Yandex Music version
         id: check
+        shell: bash
         run: |
+          set -euo pipefail
           VERSION=$(curl -fsSL \
-            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+            --retry 3 \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
             https://music-desktop-application.s3.yandex.net/stable/latest.yml \
-            | grep -m1 '^version:' | awk '{print $2}')
+            | grep -m1 '^version:' | awk '{print $2}' | tr -d '\r')
 
-          if [ -z "$VERSION" ]; then
-            echo "Could not read the version from latest.yml" >&2
+          if [[ ! "$VERSION" =~ ^[0-9]+(\.[0-9]+){1,3}([+-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid version from latest.yml: $VERSION" >&2
             exit 1
           fi
 
-          STORED=$(cat LAST_BUILD_VERSION 2>/dev/null || echo "none")
+          STORED=$(tr -d '\r\n' < LAST_BUILD_VERSION 2>/dev/null || echo "none")
           echo "latest: $VERSION | last built: $STORED"
-
-          {
-            echo "version=$VERSION"
-            if [ "$VERSION" != "$STORED" ]; then
-              echo "changed=true"
-            else
-              echo "changed=false"
-            fi
-          } >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [ "$VERSION" != "$STORED" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
 
   build:
     needs: check
@@ -62,39 +61,39 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      # Полный пайплайн: скачать сборку Яндекса, пропатчить, собрать установщик.
+      - name: Type-check sources
+        run: bun run typecheck
+
       - name: Build installer
+        env:
+          VITE_MOD_VERSION: ${{ needs.check.outputs.version }}
         run: bun start
 
-      - name: Collect artifacts
+      - name: Collect installer
         shell: pwsh
         run: |
           $out = "$env:GITHUB_WORKSPACE/artifacts"
           New-Item -ItemType Directory -Force -Path $out | Out-Null
-          Get-ChildItem -Path .versions -Recurse -Include *.exe,*.yml |
-            Where-Object { $_.FullName -notmatch 'node_modules' } |
-            Copy-Item -Destination $out
+          $installers = @(Get-ChildItem -Path .versions -Recurse -File -Filter "Setup*.exe" |
+            Where-Object { $_.FullName -notmatch 'node_modules' })
+          if ($installers.Count -eq 0) { throw "Installer was not produced" }
+          foreach ($installer in $installers) {
+            Copy-Item $installer.FullName -Destination $out -Force
+          }
           Get-ChildItem $out
 
       - name: Checksums
         shell: pwsh
         run: |
-          Get-ChildItem ./artifacts/*.exe | ForEach-Object {
-            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
-            "$hash  $($_.Name)" | Out-File ./artifacts/SHASUMS256.txt -Append
+          $checksumFile = "./artifacts/SHASUMS256.txt"
+          Remove-Item $checksumFile -Force -ErrorAction SilentlyContinue
+          $installers = @(Get-ChildItem ./artifacts/Setup*.exe -File)
+          if ($installers.Count -eq 0) { throw "No installer to checksum" }
+          foreach ($installer in $installers) {
+            $hash = (Get-FileHash $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($installer.Name)" | Out-File $checksumFile -Append -Encoding utf8
           }
-          Get-Content ./artifacts/SHASUMS256.txt
-
-      - name: Commit last built version
-        shell: bash
-        run: |
-          echo "${{ needs.check.outputs.version }}" > LAST_BUILD_VERSION
-          git config user.name "Golopmoui3"
-          git config user.email "Golopmoui3@users.noreply.github.com"
-          git add LAST_BUILD_VERSION
-          git commit -m "chore: built for Yandex Music ${{ needs.check.outputs.version }} [skip ci]"
-          git pull --rebase origin master
-          git push
+          Get-Content $checksumFile
 
       - name: Attach to release
         uses: softprops/action-gh-release@v2
@@ -105,12 +104,28 @@ jobs:
             Автоматическая сборка мода поверх последней стабильной версии Яндекс Музыки.
 
             - Версия приложения: **${{ needs.check.outputs.version }}**
-            - Установщик: `*.exe` из артефактов ниже
+            - Установщик: `Setup*.exe`
             - Целостность: `SHASUMS256.txt`
-
-            > [!WARNING]
-            > Первый запуск после обновления Яндекса может содержать баги патчера.
-            > Если что-то сломалось — открой issue с логом установщика.
           files: |
-            artifacts/*.exe
+            artifacts/Setup*.exe
             artifacts/SHASUMS256.txt
+
+      - name: Record successful release
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.check.outputs.version }}"
+          printf '%s\n' "$VERSION" > LAST_BUILD_VERSION
+          cat > .meta/meta.json <<EOF
+          {
+            "modStable": "$VERSION",
+            "downloadUrl": "https://github.com/Golopmoui3/YandexMusicBetaMod/releases/latest"
+          }
+          EOF
+
+          git config user.name "Golopmoui3"
+          git config user.email "Golopmoui3@users.noreply.github.com"
+          git add LAST_BUILD_VERSION .meta/meta.json
+          git commit -m "chore: built for Yandex Music $VERSION [skip ci]" || exit 0
+          git pull --rebase origin master
+          git push origin HEAD:master

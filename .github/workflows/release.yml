@@ -22,36 +22,40 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      # Полный пайплайн: скачать стабильную сборку Яндекс Музыки, пропатчить,
-      # собрать мод и упаковать установщик через electron-builder.
-      # winCodeSign-воркэраунд применяется сам (src/patcher/wincodesign-workaround.ts).
+      - name: Type-check sources
+        run: bun run typecheck
+
       - name: Build installer
         run: bun start
 
-      - name: Collect artifacts
+      - name: Collect installer
         shell: pwsh
         run: |
           $out = "$env:GITHUB_WORKSPACE/artifacts"
           New-Item -ItemType Directory -Force -Path $out | Out-Null
-          Get-ChildItem -Path .versions -Recurse -Include *.exe,*.yml |
-            Where-Object { $_.FullName -notmatch 'node_modules' } |
-            Copy-Item -Destination $out
-          Get-ChildItem $out
+          $installers = @(Get-ChildItem -Path .versions -Recurse -File -Filter "Setup*.exe" |
+            Where-Object { $_.FullName -notmatch 'node_modules' })
+          if ($installers.Count -eq 0) { throw "Installer was not produced" }
+          foreach ($installer in $installers) {
+            Copy-Item $installer.FullName -Destination $out -Force
+          }
 
       - name: Checksums
         shell: pwsh
         run: |
-          Get-ChildItem ./artifacts/*.exe | ForEach-Object {
-            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
-            "$hash  $($_.Name)" | Out-File ./artifacts/SHASUMS256.txt -Append
+          $checksumFile = "./artifacts/SHASUMS256.txt"
+          Remove-Item $checksumFile -Force -ErrorAction SilentlyContinue
+          foreach ($installer in Get-ChildItem ./artifacts/Setup*.exe -File) {
+            $hash = (Get-FileHash $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($installer.Name)" | Out-File $checksumFile -Append -Encoding utf8
           }
-          Get-Content ./artifacts/SHASUMS256.txt
+          if (-not (Test-Path $checksumFile)) { throw "Checksums were not produced" }
 
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/*.exe
+            artifacts/Setup*.exe
             artifacts/SHASUMS256.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

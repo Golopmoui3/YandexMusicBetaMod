@@ -46,10 +46,9 @@ export async function processBuild(build: AppBuild): Promise<string[]> {
     replacement: string,
     label: string,
   ): string => {
-    if (!contents.match(pattern as RegExp) && (typeof pattern !== "string" || !contents.includes(pattern))) {
-      fail(`Patch target not found: ${label}`);
-    }
-    return contents.replace(pattern as any, replacement);
+    const found = typeof pattern === "string" ? contents.includes(pattern) : pattern.test(contents);
+    if (!found) fail(`Patch target not found: ${label}`);
+    return contents.replace(pattern, replacement);
   };
 
   fs.rmSync(buildDir, { recursive: true, force: true });
@@ -159,11 +158,18 @@ export async function processBuild(build: AppBuild): Promise<string[]> {
   packageJsonContents.build = {
     appId: "ru.yandex.desktop.music.mod",
     productName: "Яндекс Музыка",
-    artifactName: "Setup.${version}.${ext}",
     publish: [{ provider: "github", owner: "Golopmoui3", repo: "YandexMusicBetaMod" }],
     win: {
       icon: "assets/icon.ico",
-      requestedExecutionLevel: "requireAdministrator",
+      requestedExecutionLevel: "asInvoker",
+      target: ["nsis", "portable"],
+    },
+    nsis: {
+      artifactName: "Setup.${version}.${ext}",
+    },
+    portable: {
+      artifactName: "Portable.${version}.${ext}",
+      requestExecutionLevel: "user",
     },
     linux: { icon: "assets/icon.png" },
     extraResources: [{ from: "assets/", to: "assets/", filter: ["**/*"] }],
@@ -363,7 +369,12 @@ export async function processBuild(build: AppBuild): Promise<string[]> {
   await $`bun install`.cwd(buildModdedDir);
   await applyWincodesignWorkaround();
   await $`bunx electron-builder --publish never`.cwd(buildModdedDir);
-  logProgress("✔️   Done");
+
+  const setupPath = path.join(buildModdedDir, "dist", `Setup.${build.version}.exe`);
+  const portablePath = path.join(buildModdedDir, "dist", `Portable.${build.version}.exe`);
+  requireFile(setupPath, "Setup executable");
+  requireFile(portablePath, "Portable executable");
+  logProgress(`✔️   Produced ${path.basename(setupPath)} and ${path.basename(portablePath)}`);
 
   return progress;
 }

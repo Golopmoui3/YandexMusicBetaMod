@@ -1,149 +1,93 @@
-import { onYandexApiResponse, onYandexApiRequest } from "~/mod/features/utils/utils";
+import { onYandexApiResponse } from "~/mod/features/utils/utils";
 import { getTrackUrl, getTracksInfo, QualityEnum } from "~/mod/features/utils/api";
-import { musixmatchApi } from "@ui/external-apis/musixmatch";
-import { type Lyrics, type Subtitle } from "@ui/external-apis/musixmatch/models";
 import { toast } from "sonner";
-import * as Sentry from "@sentry/react";
 
-// Заменить hasPlus на true, когда яндекс получает информацию о текущем пользователе
-onYandexApiResponse("api.music.yandex.net/account/about", async function (response: any) {
+onYandexApiResponse("api.music.yandex.net/account/about", async (response: any) => {
   const data = response.data;
-  data.hasPlus = true;
-  Sentry.setUser({
-    id: data.uid,
-    username: data.login,
-  });
-  console.log(`[PlusUnlocker] Change hasPlus value:`, data);
-  return data;
+  if (!data || typeof data !== "object") return data;
+  return { ...data, hasPlus: true };
 });
 
-// Убрать рекламу яндекса в виде контента в подборках
-onYandexApiResponse("/editorial-promotion", async function (response: any) {
-  console.log(`[PlusUnlocker] Remove promotions:`, response.data);
-  const result = { promotions: [] };
-  return result;
-});
+onYandexApiResponse("/editorial-promotion", async () => ({ promotions: [] }));
+onYandexApiResponse("/proxy/plus-red-alert/v1/alerts", async () => ({ alerts: [] }));
 
-// Не знаю, что это, но как то связано с плюсом, так что убрал
-onYandexApiResponse("/proxy/plus-red-alert/v1/alerts", async function (response: any) {
-  console.log(`[PlusUnlocker] Remove plus-red-alert:`, response.data);
-  const result = { alerts: [] };
-  return result;
-});
-
-// Убрать рекламу из треков
-onYandexApiResponse("api.music.yandex.net/get-file-info", async function (response: any) {
-  const url: string = response.url;
+onYandexApiResponse("api.music.yandex.net/get-file-info", async (response: any) => {
   const data = response.data;
+  const trackId = new URL(response.url).searchParams.get("trackId");
+  if (!trackId || !data?.downloadInfo) return data;
+  if (String(data.downloadInfo.trackId) === trackId) return data;
 
-  const trackId: string | null = new URLSearchParams(url).get("trackId");
-  if (!trackId) return data;
-
-  if (data.downloadInfo.trackId === trackId) {
+  const trackData = await getTrackUrl(trackId, data.downloadInfo.quality as QualityEnum);
+  if (trackData.isErr()) {
+    console.error("[PlusUnlocker] Error getting track URL for ad bypass:", trackData.error);
     return data;
-  } else {
-    const trackData = await getTrackUrl(trackId, data.downloadInfo.quality as QualityEnum);
-
-    if (trackData.isErr()) {
-      console.error("[PlusUnlocker] Error getting track url for ad bypass :", trackData.error);
-      return data;
-    } else {
-      console.log(`[PlusUnlocker] Ad bypassed for track ${trackId}`, trackData.value);
-      const result = { downloadInfo: trackData.value };
-      return result;
-    }
   }
+
+  return { ...data, downloadInfo: trackData.value };
 });
 
-// Убрать рекламу из обложек треков (разраб яндекса если ты это читаешь - как же ты заморочился паскуда)
 onYandexApiResponse("api.music.yandex.net", async (response: any) => {
-  function walk(obj: any, cb: (node: any, path: (string | number)[]) => void, path: (string | number)[] = []): void {
-    if (obj && typeof obj === "object") {
-      if (Array.isArray(obj)) {
-        obj.forEach((item: any, idx: number) => walk(item, cb, [...path, idx]));
-      } else {
-        cb(obj, path);
-        Object.values(obj).forEach((value: any) => walk(value, cb, path));
-      }
+  const source = response.data;
+  if (!source || typeof source !== "object") return source;
+
+  function walk(obj: any, callback: (node: any) => void): void {
+    if (!obj || typeof obj !== "object") return;
+    if (Array.isArray(obj)) {
+      obj.forEach((item) => walk(item, callback));
+      return;
     }
+    callback(obj);
+    Object.values(obj).forEach((value) => walk(value, callback));
   }
 
-  const source: any = response.data;
-
-  const ids: string[] = [];
-  walk(source, (node: any) => {
-    if (node && "id" in node && "realId" in node && "coverUri" in node && "ogImage" in node && node.type === "music") {
-      ids.push(node.id as string);
+  const ids = new Set<string>();
+  walk(source, (node) => {
+    if (node.type === "music" && node.id != null && "realId" in node && "coverUri" in node && "ogImage" in node) {
+      ids.add(String(node.id));
     }
   });
+  if (ids.size === 0) return source;
 
-  if (ids.length === 0) return source;
-
-  const trackMetaResponse = await getTracksInfo(ids, true);
+  const trackMetaResponse = await getTracksInfo([...ids], true);
   if (trackMetaResponse.isErr()) {
-    console.error("[PlusUnlocker] Error getting new images:", trackMetaResponse.error);
+    console.error("[PlusUnlocker] Error getting replacement images:", trackMetaResponse.error);
     return source;
   }
 
-  const trackMetas = trackMetaResponse.value;
-  const metaById = new Map<string, any>(trackMetas.map((m: any) => [m.id, m]));
-
-  walk(source, (node: any) => {
-    if (node && "id" in node && "realId" in node && "coverUri" in node && "ogImage" in node) {
-      const meta = metaById.get(node.id as string);
-      if (!meta) return;
-
-      node.coverUri = meta.coverUri;
-      node.ogImage = meta.ogImage;
-    }
+  const metaById = new Map<string, any>(trackMetaResponse.value.map((meta: any) => [String(meta.id), meta]));
+  walk(source, (node) => {
+    if (node?.id == null || !("coverUri" in node) || !("ogImage" in node)) return;
+    const meta = metaById.get(String(node.id));
+    if (!meta) return;
+    node.coverUri = meta.coverUri;
+    node.ogImage = meta.ogImage;
   });
-
-  console.log("[PlusUnlocker] Ads in image bypassed for tracks", ids, source);
 
   return source;
 });
 
-// Убрать блоки донатов артистам
-onYandexApiResponse("/donation", async function (response: any) {
-  console.log(`[PlusUnlocker] Remove donations`, response);
-  return {
-    donations: [],
-  };
-});
+onYandexApiResponse("/donation", async () => ({ donations: [] }));
 
-// Убрать блоки концертов если блок концертов отключен
-onYandexApiResponse("/concerts", async function (response: any) {
+onYandexApiResponse("/concerts", async (response: any) => {
   const hiddenMenuItems = (await window.yandexMusicMod.getStorageValue("custom-themes/hideMenuItems")) || [];
-
-  if (hiddenMenuItems.includes("concerts")) {
-    console.log(`[PlusUnlocker] Remove concerts`, response);
-
-    return {
-      concerts: [],
-    };
-  }
+  return Array.isArray(hiddenMenuItems) && hiddenMenuItems.includes("concerts") ? { concerts: [] } : response.data;
 });
 
-onYandexApiResponse("/rotor/session/", async function (response: any) {
-  const url: string = response.url;
+onYandexApiResponse("/rotor/session/", async (response: any) => {
   const data = response.data;
+  if (response.url.includes("feedback") || !Array.isArray(data?.sequence)) return data;
 
-  if (url.includes("feedback")) return data;
-
-  const tracks = data.sequence;
-
-  const isAllAds = tracks.every((trackInfo: any) => trackInfo.track && trackInfo.track.title === "Промокод Upgrade");
-
-  data.sequence = tracks.filter((trackInfo: any) => trackInfo.track && trackInfo.track.title !== "Промокод Upgrade");
-  console.log(`[PlusUnlocker] Remove all ads from session:`, data);
+  const isUpgradeAd = (trackInfo: any) => trackInfo?.track?.title === "Промокод Upgrade";
+  const isAllAds = data.sequence.length > 0 && data.sequence.every(isUpgradeAd);
+  const sequence = data.sequence.filter((trackInfo: any) => !isUpgradeAd(trackInfo));
 
   if (isAllAds) {
     toast.error("Моя Волна больше не работает", {
       description:
-        "Яндекс выдал вашему аккаунту теневой бан. Вы все еще сможете слушать треки в плейлистах и через поиск, но для получения рекомендаций нужно будет создать новый аккаунт и перенести треки туда, такая функция есть в моде.",
+        "Яндекс ограничил рекомендации для этого аккаунта. Плейлисты и поиск продолжат работать.",
       icon: null,
     });
   }
 
-  return data;
+  return { ...data, sequence };
 });

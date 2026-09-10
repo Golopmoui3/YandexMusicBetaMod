@@ -22,8 +22,6 @@ type CustomFont = {
   format: string;
 };
 
-// Лимит размера файла шрифта — 5 МБ. Больше в storage класть бессмысленно
-// (электрон-сторадж в JSON, лимита нет, но UI становится тормозить).
 const MAX_FONT_SIZE_BYTES = 5 * 1024 * 1024;
 
 const FORMAT_BY_EXT: Record<string, string> = {
@@ -34,9 +32,9 @@ const FORMAT_BY_EXT: Record<string, string> = {
 };
 
 function getFormat(filename: string): string | null {
-  const m = filename.toLowerCase().match(/\.([a-z0-9]+)$/);
-  if (!m) return null;
-  return FORMAT_BY_EXT[m[1]] ?? null;
+  const match = filename.toLowerCase().match(/\.([a-z0-9]+)$/);
+  const extension = match?.[1];
+  return extension ? (FORMAT_BY_EXT[extension] ?? null) : null;
 }
 
 function readFileAsDataUri(file: File): Promise<string> {
@@ -54,35 +52,28 @@ export function FontChanger() {
   const [customFonts, setCustomFonts] = useState<CustomFont[]>([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Все доступные имена для выпадающего списка — встроенные + пользовательские
-  const allFontNames = [...builtInFonts, ...customFonts.map((f) => f.name)];
+  const allFontNames = [...builtInFonts, ...customFonts.map((font) => font.name)];
 
   useEffect(() => {
-    (async () => {
+    void (async () => {
       const savedCustom = (await window.yandexMusicMod.getStorageValue("font-changer/customFonts")) as
         | CustomFont[]
         | null;
       const safeCustom = Array.isArray(savedCustom) ? savedCustom : [];
 
       const candidate = await window.yandexMusicMod.getStorageValue("font-changer/savedFont");
-      const known = [...builtInFonts, ...safeCustom.map((f) => f.name)];
-      const savedFont = known.find((f) => f === candidate) || builtInFonts[0];
-
-      const savedFontEnabled = (await window.yandexMusicMod.getStorageValue("font-changer/enabled")) || false;
+      const known = [...builtInFonts, ...safeCustom.map((font) => font.name)];
+      const savedFont = known.find((font) => font === candidate) || builtInFonts[0];
+      const savedFontEnabled = await window.yandexMusicMod.getStorageValue("font-changer/enabled");
 
       setCustomFonts(safeCustom);
-      setCustomFontEnabled(savedFontEnabled || false);
+      setCustomFontEnabled(savedFontEnabled === true);
       setSelectedFont(savedFont);
     })();
   }, []);
 
-  const handlePickFile = () => {
-    fileInputRef.current?.click();
-  };
-
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    // Сбрасываем input — иначе повторный выбор того же файла не сработает
+  const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
     if (fileInputRef.current) fileInputRef.current.value = "";
     if (!file) return;
 
@@ -101,49 +92,33 @@ export function FontChanger() {
       return;
     }
 
-    // Имя по умолчанию = имя файла без расширения
     const defaultName = file.name.replace(/\.[a-z0-9]+$/i, "").trim() || "Мой шрифт";
-
-    // Проверка коллизий с уже существующими именами
-    const allNames = new Set([...builtInFonts, ...customFonts.map((f) => f.name)]);
+    const allNames = new Set([...builtInFonts, ...customFonts.map((font) => font.name)]);
     let name = defaultName;
     let counter = 2;
-    while (allNames.has(name)) {
-      name = `${defaultName} (${counter++})`;
-    }
+    while (allNames.has(name)) name = `${defaultName} (${counter++})`;
 
     let dataUri: string;
     try {
       dataUri = await readFileAsDataUri(file);
-    } catch (err) {
-      toast.error("Не удалось прочитать файл", { description: String(err) });
+    } catch (error) {
+      toast.error("Не удалось прочитать файл", { description: String(error) });
       return;
     }
 
-    // family = id (с префиксом ymm-custom-) чтобы избежать коллизий с системными
     const id = `ymm-custom-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const newFont: CustomFont = {
-      id,
-      name,
-      family: id,
-      dataUri,
-      format,
-    };
-
-    const updated = [...customFonts, newFont];
+    const updated = [...customFonts, { id, name, family: id, dataUri, format }];
     setCustomFonts(updated);
     await window.yandexMusicMod.setStorageValue("font-changer/customFonts", updated);
-
     toast.success("Шрифт добавлен", { description: name });
   };
 
   const handleRemove = async (id: string) => {
-    const removed = customFonts.find((f) => f.id === id);
-    const updated = customFonts.filter((f) => f.id !== id);
+    const removed = customFonts.find((font) => font.id === id);
+    const updated = customFonts.filter((font) => font.id !== id);
     setCustomFonts(updated);
     await window.yandexMusicMod.setStorageValue("font-changer/customFonts", updated);
 
-    // Если удалили активный шрифт — откатываемся на встроенный
     if (removed && selectedFont === removed.name) {
       setSelectedFont(builtInFonts[0]);
       await window.yandexMusicMod.setStorageValue("font-changer/savedFont", builtInFonts[0]);
@@ -161,7 +136,7 @@ export function FontChanger() {
             checked={customFontEnabled}
             onCheckedChange={(enabled) => {
               setCustomFontEnabled(enabled);
-              window.yandexMusicMod.setStorageValue("font-changer/enabled", enabled);
+              void window.yandexMusicMod.setStorageValue("font-changer/enabled", enabled);
             }}
           />
           <Label htmlFor="font-changer-toggle" className="cursor-pointer">
@@ -176,7 +151,7 @@ export function FontChanger() {
               value={selectedFont}
               onValueChange={(value: string) => {
                 setSelectedFont(value);
-                window.yandexMusicMod.setStorageValue("font-changer/savedFont", value);
+                void window.yandexMusicMod.setStorageValue("font-changer/savedFont", value);
               }}
               disabled={!customFontEnabled}
             >
@@ -202,7 +177,7 @@ export function FontChanger() {
             className="hidden"
             onChange={handleFileChange}
           />
-          <Button variant="outline" size="sm" className="w-full" onClick={handlePickFile}>
+          <Button variant="outline" size="sm" className="w-full" onClick={() => fileInputRef.current?.click()}>
             <Upload className="h-4 w-4 mr-2" />
             Добавить свой шрифт
           </Button>
@@ -224,7 +199,7 @@ export function FontChanger() {
                   variant="ghost"
                   size="icon"
                   className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                  onClick={() => handleRemove(font.id)}
+                  onClick={() => void handleRemove(font.id)}
                   title="Удалить"
                 >
                   <Trash2 className="h-4 w-4" />

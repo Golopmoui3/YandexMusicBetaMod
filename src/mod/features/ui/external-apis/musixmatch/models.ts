@@ -2,10 +2,7 @@ export interface AllMetaResponse {
   macro_calls: {
     "track.lyrics.get": {
       message: {
-        header: {
-          status_code: number;
-          execute_time: number;
-        };
+        header: { status_code: number; execute_time: number };
         body: {
           lyrics: {
             lyrics_id: number;
@@ -35,10 +32,7 @@ export interface AllMetaResponse {
     };
     "track.snippet.get": {
       message: {
-        header: {
-          status_code: number;
-          execute_time: number;
-        };
+        header: { status_code: number; execute_time: number };
         body: {
           snippet: {
             snippet_id: number;
@@ -63,7 +57,7 @@ export interface AllMetaResponse {
           instrumental: number;
         };
         body: {
-          subtitle_list: {
+          subtitle_list: Array<{
             subtitle: {
               subtitle_id: number;
               restricted: number;
@@ -81,7 +75,7 @@ export interface AllMetaResponse {
               publisher_list: any[];
               updated_time: string;
             };
-          }[];
+          }>;
         };
       };
     };
@@ -138,7 +132,7 @@ export interface AllMetaResponse {
             first_release_date: string;
             updated_time: string;
             primary_genres: {
-              music_genre_list: {
+              music_genre_list: Array<{
                 music_genre: {
                   music_genre_id: number;
                   music_genre_parent_id: number;
@@ -146,25 +140,20 @@ export interface AllMetaResponse {
                   music_genre_name_extended: string;
                   music_genre_vanity: string;
                 };
-              }[];
+              }>;
             };
-            secondary_genres: {
-              music_genre_list: any[];
-            };
+            secondary_genres: { music_genre_list: any[] };
           };
         };
       };
     };
     "userblob.get": {
-      message: {
-        header: {
-          status_code: number;
-        };
-      };
-      meta: {
-        status_code: number;
-        last_updated: string;
-      };
+      message: { header: { status_code: number } };
+      meta: { status_code: number; last_updated: string };
     };
   };
 }
+
+export type Lyrics = AllMetaResponse["macro_calls"]["track.lyrics.get"]["message"]["body"]["lyrics"];
+export type Subtitle = AllMetaResponse["macro_calls"]["track.subtitles.get"]["message"]["body"]["subtitle_list"][number]["subtitle"];
+export type Track = AllMetaResponse["macro_calls"]["matcher.track.get"]["message"]["body"]["track"];

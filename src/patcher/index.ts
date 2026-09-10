@@ -12,9 +12,20 @@ const files = stableBuild.value;
 let hasFailures = false;
 
 for (const file of files) {
-  // Vite inherits this value and embeds the actual Yandex Music build version
-  // into the mod. No manual .env version bump is needed.
-  process.env.VITE_MOD_VERSION = file.version;
+  // Release workflows inject an automatically generated fork build revision.
+  // Local and pull-request builds fall back to the Yandex Music app version.
+  const injectedModVersion = process.env.VITE_MOD_VERSION?.trim();
+  if (
+    injectedModVersion &&
+    injectedModVersion !== file.version &&
+    !injectedModVersion.startsWith(`${file.version}.`)
+  ) {
+    console.error(`Mod version ${injectedModVersion} does not match Yandex Music ${file.version}`);
+    hasFailures = true;
+    continue;
+  }
+  process.env.VITE_MOD_VERSION = injectedModVersion || file.version;
+  console.log(`Building Yandex Music ${file.version} with mod version ${process.env.VITE_MOD_VERSION}`);
 
   try {
     const result = await processBuild(file);

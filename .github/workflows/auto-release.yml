@@ -17,6 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.check.outputs.version }}
+      mod_version: ${{ steps.check.outputs.mod_version }}
       changed: ${{ steps.check.outputs.changed }}
     steps:
       - uses: actions/checkout@v4
@@ -38,8 +39,10 @@ jobs:
           fi
 
           STORED=$(tr -d '\r\n' < LAST_BUILD_VERSION 2>/dev/null || echo "none")
-          echo "latest: $VERSION | last built: $STORED"
+          MOD_VERSION="$VERSION.$GITHUB_RUN_ID"
+          echo "latest: $VERSION | last built: $STORED | mod: $MOD_VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "mod_version=$MOD_VERSION" >> "$GITHUB_OUTPUT"
           if [ "$VERSION" != "$STORED" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
@@ -66,7 +69,7 @@ jobs:
 
       - name: Build Setup and Portable executables
         env:
-          VITE_MOD_VERSION: ${{ needs.check.outputs.version }}
+          VITE_MOD_VERSION: ${{ needs.check.outputs.mod_version }}
         run: bun start
 
       - name: Collect and validate release artifacts
@@ -103,12 +106,13 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: app-${{ needs.check.outputs.version }}
+          tag_name: app-${{ needs.check.outputs.mod_version }}
           target_commitish: master
-          name: "Яндекс Музыка ${{ needs.check.outputs.version }} — авто-сборка мода"
+          name: "Yandex Music Mod ${{ needs.check.outputs.mod_version }}"
           body: |
             Автоматическая сборка мода поверх последней стабильной версии Яндекс Музыки.
 
+            - Версия мода: **${{ needs.check.outputs.mod_version }}**
             - Версия приложения: **${{ needs.check.outputs.version }}**
             - `Setup.${{ needs.check.outputs.version }}.exe` — установщик Windows
             - `Portable.${{ needs.check.outputs.version }}.exe` — переносимая версия без установки
@@ -128,9 +132,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $version = "${{ needs.check.outputs.version }}"
-          $tag = "app-$version"
-          $allowed = @("Setup.$version.exe", "Portable.$version.exe", "SHASUMS256.txt")
+          $appVersion = "${{ needs.check.outputs.version }}"
+          $tag = "app-${{ needs.check.outputs.mod_version }}"
+          $allowed = @("Setup.$appVersion.exe", "Portable.$appVersion.exe", "SHASUMS256.txt")
           $release = gh release view $tag --repo Golopmoui3/YandexMusicBetaMod --json assets | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0) { throw "Unable to read release $tag" }
 
@@ -154,11 +158,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          VERSION="${{ needs.check.outputs.version }}"
-          printf '%s\n' "$VERSION" > LAST_BUILD_VERSION
+          APP_VERSION="${{ needs.check.outputs.version }}"
+          MOD_VERSION="${{ needs.check.outputs.mod_version }}"
+          printf '%s\n' "$APP_VERSION" > LAST_BUILD_VERSION
           cat > .meta/meta.json <<EOF
           {
-            "modStable": "$VERSION",
+            "modStable": "$MOD_VERSION",
             "downloadUrl": "https://github.com/Golopmoui3/YandexMusicBetaMod/releases/latest"
           }
           EOF
@@ -166,6 +171,6 @@ jobs:
           git config user.name "Golopmoui3"
           git config user.email "Golopmoui3@users.noreply.github.com"
           git add LAST_BUILD_VERSION .meta/meta.json
-          git commit -m "chore: built for Yandex Music $VERSION [skip ci]" || exit 0
+          git commit -m "chore: publish mod $MOD_VERSION for Yandex Music $APP_VERSION [skip ci]" || exit 0
           git pull --rebase origin master
           git push origin HEAD:master

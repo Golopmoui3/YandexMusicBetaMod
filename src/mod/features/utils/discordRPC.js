@@ -2,137 +2,152 @@ const { BrowserWindow } = require("electron");
 const { Client } = require("@xhayper/discord-rpc");
 
 const CLIENT_ID = "1283109459463377011";
+const REPOSITORY_URL = "https://github.com/Golopmoui3/YandexMusicBetaMod";
+const POLL_INTERVAL_MS = 1_000;
+const MAX_RECONNECT_DELAY_MS = 30_000;
 
-let lastTrackId = null;
-let lastIsPlaying = null;
-let client;
+let client = null;
+let reconnectTimer = null;
+let reconnectDelay = 3_000;
+let pollTimer = null;
+let lastActivityKey = null;
+let connecting = false;
 
-function initRpc() {
-  client = new Client({ clientId: CLIENT_ID });
+function destroyClient(target) {
+  try {
+    target?.destroy?.();
+  } catch (error) {
+    console.warn("[DISCORD RPC] Failed to destroy old client:", error);
+  }
+}
 
-  client.login().catch((e) => {
-    console.error("[DISCORD RPC]", e);
-    setTimeout(initRpc, 3000);
+function scheduleReconnect(reason) {
+  if (reconnectTimer) return;
+  console.warn(`[DISCORD RPC] Reconnecting after ${reason} in ${reconnectDelay}ms`);
+
+  const staleClient = client;
+  client = null;
+  lastActivityKey = null;
+  destroyClient(staleClient);
+
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    void initRpc();
+  }, reconnectDelay);
+  reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY_MS);
+}
+
+async function initRpc() {
+  if (connecting || client) return;
+  connecting = true;
+
+  const nextClient = new Client({ clientId: CLIENT_ID });
+  client = nextClient;
+
+  const handleDisconnect = (eventName) => {
+    if (client === nextClient) scheduleReconnect(eventName);
+  };
+
+  nextClient.on("ready", () => {
+    reconnectDelay = 3_000;
+    lastActivityKey = null;
+    console.log("[DISCORD RPC] Connected");
   });
+  nextClient.on("disconnected", () => handleDisconnect("disconnect"));
+  nextClient.on("error", () => handleDisconnect("error"));
+  nextClient.on("close", () => handleDisconnect("close"));
 
-  client.on("ready", () => {
-    console.log("[DISCORD RPC] Hooked!");
-    console.log("client.user", client.user?.username);
-  });
+  try {
+    await nextClient.login();
+  } catch (error) {
+    console.error("[DISCORD RPC] Login failed:", error);
+    if (client === nextClient) scheduleReconnect("login failure");
+  } finally {
+    connecting = false;
+  }
+}
 
-  client.on("disconnected", () => {
-    console.log("[DISCORD RPC] Disconnected");
-    setTimeout(initRpc, 3000);
-  });
+function buildActivity(playerState) {
+  const data = playerState.data;
+  const trackMeta = data.trackMeta;
+  const artists = Array.isArray(trackMeta.artists) ? trackMeta.artists : [];
+  const firstArtist = artists[0];
+  const showArtist = playerState.showArtist !== false;
+  const artistAvatar =
+    showArtist && firstArtist?.avatarUri
+      ? "https://" + firstArtist.avatarUri.replaceAll("%%", "100x100")
+      : undefined;
+  const position = Number(data.playback?.position) || 0;
+  const duration = Number(data.playback?.duration) || 0;
 
-  client.on("error", () => {
-    console.log("[DISCORD RPC] Error");
-    setTimeout(initRpc, 3000);
-  });
-  client.on("close", () => {
-    console.log("[DISCORD RPC] Closed");
-    setTimeout(initRpc, 3000);
-  });
+  const activity = {
+    type: 2,
+    details: trackMeta.version ? `${trackMeta.title} ${trackMeta.version}` : trackMeta.title,
+    largeImageKey: trackMeta.coverUri ? "https://" + trackMeta.coverUri.replaceAll("%%", "300x300") : undefined,
+    largeImageText: trackMeta.albums?.[0]?.title || undefined,
+    smallImageKey: artistAvatar,
+    smallImageText: showArtist ? firstArtist?.name || undefined : undefined,
+    state: showArtist ? artists.map((artist) => artist.name).join(", ") : undefined,
+    startTimestamp: Math.round(Date.now() - position * 1_000),
+    endTimestamp: Math.round(Date.now() + Math.max(0, duration - position) * 1_000),
+    buttons: [
+      {
+        label: "🎵 Открыть",
+        url: "https://music.yandex.ru/track/" + encodeURIComponent(String(trackMeta.id)),
+      },
+    ],
+    instance: false,
+  };
+
+  if (playerState.showModButton) {
+    activity.buttons.push({ label: "💻 Yandex Music Mod", url: REPOSITORY_URL });
+  }
+
+  return activity;
 }
 
 async function updateActivity() {
-  setTimeout(updateActivity, 500);
-
-  if (!client.user) return;
-
   try {
-    const playerState = await GetAppPlayerState();
+    const activeClient = client;
+    if (!activeClient?.user) return;
 
-    // Окно могло быть закрыто/уничтожено - executeJavaScript вернёт undefined.
-    // Без guard'а сюда каждый тик падает исключение и засоряет консоль.
+    const playerState = await getAppPlayerState();
     if (!playerState) return;
 
-    // Discord RPC не включен
-    if (!playerState.enabled) {
-      if (lastTrackId !== null) {
-        client.user.clearActivity();
-        lastTrackId = null;
-        lastIsPlaying = null;
+    if (!playerState.enabled || !playerState.data?.isPlaying) {
+      if (lastActivityKey !== null) {
+        await activeClient.user.clearActivity();
+        lastActivityKey = null;
       }
       return;
     }
 
-    const playerStateData = playerState.data;
+    const activityKey = JSON.stringify({
+      id: playerState.data.trackMeta?.id,
+      title: playerState.data.trackMeta?.title,
+      playing: playerState.data.isPlaying,
+      showArtist: playerState.showArtist,
+      showModButton: playerState.showModButton,
+    });
+    if (activityKey === lastActivityKey) return;
 
-    if (!playerStateData || !playerStateData.isPlaying) {
-      if (lastIsPlaying !== false) {
-        client.user.clearActivity();
-        lastIsPlaying = false;
-        lastTrackId = null;
-      }
-      return;
-    }
-
-    const currentTrackId = playerStateData.trackMeta?.id;
-
-    const startTimestamp = Math.round(Date.now() - playerStateData.playback.position * 1000);
-    const endTimestamp = Math.round(
-      Date.now() + (playerStateData.playback.duration - playerStateData.playback.position) * 1000,
-    );
-
-    const firstArtist = playerStateData.trackMeta.artists?.[0];
-    const showArtist = playerState.showArtist !== false;
-    const artistAvatar =
-      showArtist && firstArtist?.avatarUri
-        ? `https://${firstArtist.avatarUri.replaceAll("%%", "100x100")}`
-        : undefined;
-    const artistsLine = showArtist
-      ? playerStateData.trackMeta.artists.map((a) => a.name).join(", ")
-      : undefined;
-
-    const rpcRequest = {
-      type: 2,
-      details: playerStateData.trackMeta.version
-        ? `${playerStateData.trackMeta.title} ${playerStateData.trackMeta.version}`
-        : playerStateData.trackMeta.title,
-      largeImageKey: playerStateData.trackMeta.coverUri
-        ? `https://${playerStateData.trackMeta.coverUri.replaceAll("%%", "300x300")}`
-        : undefined,
-      largeImageText: playerStateData.trackMeta.albums?.[0]?.title || undefined,
-      smallImageKey: artistAvatar,
-      smallImageText: showArtist ? firstArtist?.name || undefined : undefined,
-      state: artistsLine,
-      startTimestamp: startTimestamp,
-      endTimestamp: endTimestamp,
-      buttons: [
-        {
-          label: "🎵 Открыть",
-          url: `https://music.yandex.ru/track/${playerStateData.trackMeta.id}`,
-        },
-      ],
-      instance: false,
-    };
-
-    if (playerState.showModButton) {
-      rpcRequest.buttons.push({
-        label: "💻 Yandex Music Mod",
-        url: `https://github.com/Stephanzion/YandexMusicBetaMod`,
-      });
-    }
-
-    client.user.setActivity(rpcRequest);
-    lastTrackId = currentTrackId;
-    lastIsPlaying = true;
-  } catch (ex) {
-    console.log("[DISCORD RPC]", ex);
+    await activeClient.user.setActivity(buildActivity(playerState));
+    lastActivityKey = activityKey;
+  } catch (error) {
+    console.warn("[DISCORD RPC] Activity update failed:", error);
+  } finally {
+    pollTimer = setTimeout(updateActivity, POLL_INTERVAL_MS);
   }
 }
 
-initRpc();
-updateActivity();
+async function getAppPlayerState() {
+  const window = BrowserWindow.getAllWindows().find((candidate) => !candidate.isDestroyed());
+  if (!window) return undefined;
 
-async function GetAppPlayerState() {
-  const [win] = BrowserWindow.getAllWindows();
-  if (win && !win.isDestroyed()) {
-    return win.webContents.executeJavaScript(`
-        (()=>{
-            return window.__getPlayerState();
-        })()
-       `);
-  }
+  return window.webContents.executeJavaScript(`
+    (() => typeof window.__getPlayerState === "function" ? window.__getPlayerState() : undefined)()
+  `);
 }
+
+void initRpc();
+if (!pollTimer) void updateActivity();

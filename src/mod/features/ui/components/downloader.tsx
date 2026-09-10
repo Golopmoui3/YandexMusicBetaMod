@@ -1,7 +1,7 @@
-import { useMemo, useState, useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
-import { isPlaying, getProgress, getTrackMeta } from "~/mod/features/utils/player";
+import { getTrackMeta } from "~/mod/features/utils/player";
 import {
   getAlbumTracks,
   getArtistTracks,
@@ -16,15 +16,14 @@ import { Button } from "@ui/components/ui/button";
 import { If } from "@ui/components/ui/if";
 import { Progress } from "@ui/components/ui/progress";
 import { toast } from "sonner";
-import { Alert, AlertDescription } from "@ui/components/ui/alert";
+import { Alert } from "@ui/components/ui/alert";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@ui/components/ui/select";
 import { Input } from "@ui/components/ui/input";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@ui/components/ui/tooltip";
-
 import { Info, FolderOpen, Folder, Download } from "lucide-react";
 import * as Sentry from "@sentry/react";
 
-enum pageTypeEnum {
+enum PageType {
   OTHER,
   ARTIST,
   PLAYLIST,
@@ -37,264 +36,197 @@ const qualityLabels: Record<QualityEnum, string> = {
   [QualityEnum.LQ]: "Низкое",
 };
 
+function resultValueOrThrow<T>(result: { isErr: () => boolean; error?: string; value?: T }): T {
+  if (result.isErr()) throw new Error(result.error || "Неизвестная ошибка API");
+  return result.value as T;
+}
+
 export function Downloader() {
-  const [downloadType, setDownloadType] = useState(pageTypeEnum.OTHER);
+  const [downloadType, setDownloadType] = useState(PageType.OTHER);
   const [downloadQuality, setDownloadQuality] = useState(QualityEnum.LOSSLESS);
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState(0);
   const [downloadStatusText, setDownloadStatusText] = useState("");
   const [downloadFolderPath, setDownloadFolderPath] = useState<string | null>(null);
-  const downloadCancelledRef = useRef(false);
+  const operationIdRef = useRef(0);
+  const cancellationRequestedRef = useRef(false);
+  const operationRunningRef = useRef(false);
 
-  // Load saved download folder path on component mount
   useEffect(() => {
-    const loadDownloadPath = async () => {
-      try {
-        const savedPath = await window.yandexMusicMod.getStorageValue("downloadFolderPath");
-        if (savedPath) {
-          setDownloadFolderPath(savedPath);
-        }
-      } catch (error) {
-        console.warn("Failed to load download folder path:", error);
-      }
+    let active = true;
+    void window.yandexMusicMod.getStorageValue("downloadFolderPath").then((savedPath) => {
+      if (active && typeof savedPath === "string" && savedPath.length > 0) setDownloadFolderPath(savedPath);
+    });
+    return () => {
+      active = false;
     };
-    loadDownloadPath();
   }, []);
 
-  // Save download folder path when it changes
-  const saveDownloadPath = async (path: string | null) => {
-    try {
-      await window.yandexMusicMod.setStorageValue("downloadFolderPath", path);
-      setDownloadFolderPath(path);
-    } catch (error) {
-      console.error("Failed to save download folder path:", error);
-      toast.error("Не удалось сохранить путь к папке");
-    }
+  const saveDownloadPath = async (folderPath: string) => {
+    await window.yandexMusicMod.setStorageValue("downloadFolderPath", folderPath);
+    setDownloadFolderPath(folderPath);
   };
 
-  // Handle folder selection
   const handleSelectFolder = async () => {
     try {
       const result = await window.yandexMusicMod.selectDownloadFolder();
-      if (result.success && result.path) {
-        await saveDownloadPath(result.path);
-        toast.success("Папка для загрузки выбрана", {
-          description: result.path,
-        });
-      }
+      if (!result.success || !result.path) return;
+      await saveDownloadPath(result.path);
+      toast.success("Папка для загрузки выбрана", { description: result.path });
     } catch (error) {
-      console.error("Failed to select folder:", error);
-      toast.error("Не удалось выбрать папку");
+      toast.error("Не удалось выбрать папку", { description: String(error) });
     }
   };
 
-  // Handle opening folder
   const handleOpenFolder = async () => {
-    if (!downloadFolderPath) {
-      toast.warning("Папка не выбрана");
-      return;
-    }
-
-    try {
-      const result = await window.yandexMusicMod.openFolder(downloadFolderPath);
-      if (!result.success) {
-        toast.error("Не удалось открыть папку", {
-          description: result.error || "Неизвестная ошибка",
-        });
-      }
-    } catch (error) {
-      console.error("Failed to open folder:", error);
-      toast.error("Не удалось открыть папку");
-    }
+    if (!downloadFolderPath) return;
+    const result = await window.yandexMusicMod.openFolder(downloadFolderPath);
+    if (!result.success) toast.error("Не удалось открыть папку", { description: result.error });
   };
 
   const pageType = window.location.href.includes("/artist")
-    ? pageTypeEnum.ARTIST
+    ? PageType.ARTIST
     : window.location.href.includes("/playlists")
-      ? pageTypeEnum.PLAYLIST
+      ? PageType.PLAYLIST
       : window.location.href.includes("/album")
-        ? pageTypeEnum.ALBUM
-        : pageTypeEnum.OTHER;
+        ? PageType.ALBUM
+        : PageType.OTHER;
 
-  useEffect(() => {
-    setDownloadType(pageType);
-  }, [pageType]);
+  useEffect(() => setDownloadType(pageType), [pageType]);
 
   const urlParams = new URLSearchParams(window.location.search);
-
   const collectionId =
-    pageType === pageTypeEnum.ARTIST
+    pageType === PageType.ARTIST
       ? urlParams.get("artistId")
-      : pageType === pageTypeEnum.ALBUM
+      : pageType === PageType.ALBUM
         ? urlParams.get("albumId")
-        : pageType === pageTypeEnum.PLAYLIST
+        : pageType === PageType.PLAYLIST
           ? urlParams.get("playlistUuid")
           : null;
 
-  const getTrackMetaQuery = useQuery({
-    queryKey: ["player-test-track-meta"],
+  const trackMetaQuery = useQuery({
+    queryKey: ["current-track-meta"],
     queryFn: async () => {
-      const data = getTrackMeta();
-      if (data.isErr()) throw data.error;
-      return data.value;
+      const result = getTrackMeta();
+      if (result.isErr()) throw new Error(result.error);
+      return result.value;
     },
-    enabled: true,
     retry: false,
     staleTime: 500,
     refetchInterval: 500,
   });
 
-  async function downloadTracks(trackIds: string[], quality: QualityEnum) {
-    const tracks = [];
+  const isCancelled = (operationId: number) =>
+    cancellationRequestedRef.current || operationIdRef.current !== operationId;
+
+  async function downloadTracks(trackIds: string[], quality: QualityEnum, operationId: number) {
+    if (trackIds.length === 0) throw new Error("В выбранной коллекции нет треков");
+
+    const tracks: any[] = [];
     const chunkSize = 50;
 
-    for (var i = 0; i < trackIds.length; i += chunkSize) {
-      setDownloadStatusText(`Получение информации о треках ${((i / trackIds.length) * 100).toFixed(2)}%`);
-      setDownloadProgress((i / trackIds.length) * 100);
-      if (downloadCancelledRef.current) return;
+    for (let offset = 0; offset < trackIds.length; offset += chunkSize) {
+      if (isCancelled(operationId)) return;
+      setDownloadStatusText(`Получение информации о треках ${Math.round((offset / trackIds.length) * 100)}%`);
+      setDownloadProgress((offset / trackIds.length) * 100);
 
-      const chunk = trackIds.slice(i, i + chunkSize);
-
-      var newTracks = await getTracksInfo(chunk, true);
-
-      console.log("[Downloader] get tracks info", chunk, newTracks);
-
-      if (newTracks.isErr()) {
-        console.error("[Downloader] get tracks info", newTracks.error);
-        return toast.error(
-          `Произошла ошибка при получении информации о треках (${i * chunkSize} / ${trackIds.length})`,
-          {
-            description: newTracks.error,
-          },
-        );
+      const chunk = trackIds.slice(offset, offset + chunkSize);
+      const result = await getTracksInfo(chunk, true);
+      if (result.isErr()) {
+        throw new Error(`Не удалось получить треки ${offset + 1}–${Math.min(offset + chunk.length, trackIds.length)}: ${result.error}`);
       }
-
-      tracks.push(...newTracks.value);
-
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      tracks.push(...result.value);
     }
 
-    console.log("[Downloader] tracks info", tracks);
+    for (let index = 0; index < tracks.length; index++) {
+      if (isCancelled(operationId)) return;
 
-    const downloadedTracks = [];
+      const track = tracks[index];
+      const trackTitle = `${track.artists?.map((artist: any) => artist.name).join(", ") || "Неизвестный артист"} - ${track.title || "Без названия"}`;
+      setDownloadStatusText(`Скачивание треков ${index + 1} / ${tracks.length}`);
+      setDownloadProgress((index / tracks.length) * 100);
 
-    for (var i = 0; i < tracks.length; i++) {
-      setDownloadStatusText(`Скачивание треков ${i + 1} / ${tracks.length}`);
-      setDownloadProgress((i / tracks.length) * 100);
-      if (downloadCancelledRef.current) return;
-
-      const trackTitle = `${tracks[i]!.artists.map((a: any) => a.name).join(", ")} - ${tracks[i]!.title}`;
-
-      if (tracks[i]!.available === false) {
-        console.log("[Downloader] Track is not available", tracks[i]);
-        toast.warning("Трек недоступен", {
-          description: trackTitle,
-        });
+      if (track.available === false) {
+        toast.warning("Трек недоступен", { description: trackTitle });
         continue;
       }
 
-      const downloadInfo = await getTrackUrl(tracks[i]!.id, quality);
-
+      const downloadInfo = await getTrackUrl(String(track.id), quality);
       if (downloadInfo.isErr()) {
-        console.log("[Downloader] DownloadUrl not available", tracks[i]);
-        toast.error("Не удалось получить ссылку для загрузки трека", {
-          description: trackTitle,
-        });
+        toast.error("Не удалось получить ссылку для загрузки", { description: trackTitle });
         continue;
       }
-
-      Sentry.metrics.count("tracks_downloaded", 1);
-
-      console.log("[Downloader] got track download url", tracks[i], downloadInfo.value);
 
       const downloadResult = await window.yandexMusicMod.downloadTrack(
         downloadInfo.value,
-        tracks[i],
-        downloadFolderPath || "",
+        track,
+        downloadFolderPath || undefined,
       );
-
-      if (downloadResult.error) {
-        console.error("[Downloader] error while downloading track", downloadResult.error);
-        toast.error("Не удалось скачать трек", {
-          description: downloadResult.error,
-        });
+      if (!downloadResult.ok) {
+        toast.error("Не удалось скачать трек", { description: downloadResult.error || trackTitle });
         continue;
       }
 
-      console.log("[Downloader] downloadResult", downloadResult);
-
-      downloadedTracks.push(tracks[i]!);
-
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      if (window.__yandexMusicModAnalyticsEnabled === true) Sentry.metrics.count("tracks_downloaded", 1);
+      setDownloadProgress(((index + 1) / tracks.length) * 100);
     }
   }
 
-  async function downloadButtonClick() {
-    if (isDownloading) {
-      downloadCancelledRef.current = true;
-      setIsDownloading(false);
-      setDownloadStatusText("");
-      setDownloadProgress(0);
+  async function resolveTrackIds(): Promise<string[]> {
+    switch (downloadType) {
+      case PageType.OTHER: {
+        const trackId = trackMetaQuery.data?.id;
+        if (!trackId) throw new Error("Текущий трек не определён");
+        return [String(trackId)];
+      }
+      case PageType.ALBUM:
+        if (!collectionId) throw new Error("Не удалось определить альбом");
+        return resultValueOrThrow(await getAlbumTracks(collectionId));
+      case PageType.ARTIST:
+        if (!collectionId) throw new Error("Не удалось определить артиста");
+        return resultValueOrThrow(await getArtistTracks(collectionId));
+      case PageType.PLAYLIST:
+        if (!collectionId) throw new Error("Не удалось определить плейлист");
+        return resultValueOrThrow(await getPlaylistTracks(collectionId));
+      default:
+        throw new Error("Неизвестный тип загрузки");
+    }
+  }
+
+  async function handleDownloadClick() {
+    if (operationRunningRef.current) {
+      cancellationRequestedRef.current = true;
+      setDownloadStatusText("Остановка после текущего файла…");
       return;
     }
 
-    downloadCancelledRef.current = false;
+    const operationId = ++operationIdRef.current;
+    operationRunningRef.current = true;
+    cancellationRequestedRef.current = false;
     setIsDownloading(true);
+    setDownloadProgress(0);
 
-    switch (downloadType) {
-      case pageTypeEnum.OTHER:
-        await downloadTracks([getTrackMetaQuery.data.id], downloadQuality);
-        break;
-
-      case pageTypeEnum.ALBUM:
-        if (collectionId) {
-          const trackIds = await getAlbumTracks(collectionId);
-          if (trackIds.isErr()) {
-            toast.error("Произошла ошибка", {
-              description: trackIds.error,
-            });
-            return;
-          }
-          await downloadTracks(trackIds.value, downloadQuality);
-        }
-        break;
-
-      case pageTypeEnum.ARTIST:
-        if (collectionId) {
-          const trackIds = await getArtistTracks(collectionId);
-          if (trackIds.isErr()) {
-            toast.error("Произошла ошибка", {
-              description: trackIds.error,
-            });
-            return;
-          }
-          await downloadTracks(trackIds.value, downloadQuality);
-        }
-        break;
-
-      case pageTypeEnum.PLAYLIST:
-        if (collectionId) {
-          const trackIds = await getPlaylistTracks(collectionId);
-          if (trackIds.isErr()) {
-            toast.error("Произошла ошибка", {
-              description: trackIds.error,
-            });
-            return;
-          }
-          await downloadTracks(trackIds.value, downloadQuality);
-        }
-        break;
-
-      default:
-        toast.error("Неизвестный тип загрузки");
-        break;
+    try {
+      const trackIds = await resolveTrackIds();
+      await downloadTracks(trackIds, downloadQuality, operationId);
+      if (!isCancelled(operationId)) toast.success("Загрузка завершена");
+    } catch (error) {
+      if (!isCancelled(operationId)) toast.error("Произошла ошибка", { description: String(error) });
+    } finally {
+      if (operationIdRef.current === operationId) {
+        operationRunningRef.current = false;
+        cancellationRequestedRef.current = false;
+        setIsDownloading(false);
+        setDownloadStatusText("");
+        setDownloadProgress(0);
+      }
     }
-
-    setIsDownloading(false);
   }
 
+  const currentTrackUnavailable = downloadType === PageType.OTHER && !trackMetaQuery.data?.id;
+
   return (
-    <ExpandableCard title="Скачать треки" icon={<Download className="h-4 w-4" />} opened={true}>
+    <ExpandableCard title="Скачать треки" icon={<Download className="h-4 w-4" />} opened>
       <div className="flex flex-col gap-5 pt-2 px-3">
         <If condition={isDownloading}>
           <div className="flex flex-col gap-3">
@@ -305,98 +237,55 @@ export function Downloader() {
 
         <div className="flex gap-4 items-center justify-center">
           <span className="text-sm text-foreground">Скачать</span>
-          <Select value={downloadType.toString()} onValueChange={(value) => setDownloadType(parseInt(value, 10))}>
-            <SelectTrigger className="text-foreground w-full">
-              <SelectValue className="text-foreground" />
-            </SelectTrigger>
+          <Select value={downloadType.toString()} onValueChange={(value) => setDownloadType(Number.parseInt(value, 10))} disabled={isDownloading}>
+            <SelectTrigger className="text-foreground w-full"><SelectValue /></SelectTrigger>
             <SelectContent>
-              <SelectItem value={pageTypeEnum.OTHER.toString()}>Текущий трек</SelectItem>
-
-              <If condition={pageType === pageTypeEnum.ALBUM}>
-                <SelectItem value={pageTypeEnum.ALBUM.toString()}>Весь альбом</SelectItem>
-              </If>
-              <If condition={pageType === pageTypeEnum.PLAYLIST}>
-                <SelectItem value={pageTypeEnum.PLAYLIST.toString()}>Весь плейлист</SelectItem>
-              </If>
-              <If condition={pageType === pageTypeEnum.ARTIST}>
-                <SelectItem value={pageTypeEnum.ARTIST.toString()}>Все треки артиста</SelectItem>
-              </If>
+              <SelectItem value={PageType.OTHER.toString()}>Текущий трек</SelectItem>
+              <If condition={pageType === PageType.ALBUM}><SelectItem value={PageType.ALBUM.toString()}>Весь альбом</SelectItem></If>
+              <If condition={pageType === PageType.PLAYLIST}><SelectItem value={PageType.PLAYLIST.toString()}>Весь плейлист</SelectItem></If>
+              <If condition={pageType === PageType.ARTIST}><SelectItem value={PageType.ARTIST.toString()}>Все треки артиста</SelectItem></If>
             </SelectContent>
           </Select>
         </div>
 
         <div className="flex gap-4 items-center justify-center">
           <span className="text-sm text-foreground">Качество</span>
-          <Select value={downloadQuality} onValueChange={(value) => setDownloadQuality(value as QualityEnum)}>
-            <SelectTrigger className="text-foreground w-full">
-              <SelectValue className="text-foreground" />
-            </SelectTrigger>
+          <Select value={downloadQuality} onValueChange={(value) => setDownloadQuality(value as QualityEnum)} disabled={isDownloading}>
+            <SelectTrigger className="text-foreground w-full"><SelectValue /></SelectTrigger>
             <SelectContent>
-              {Object.values(QualityEnum).map((quality) => (
-                <SelectItem key={quality} value={quality}>
-                  {qualityLabels[quality]}
-                </SelectItem>
-              ))}
+              {Object.values(QualityEnum).map((quality) => <SelectItem key={quality} value={quality}>{qualityLabels[quality]}</SelectItem>)}
             </SelectContent>
           </Select>
         </div>
 
         <div className="flex gap-3">
-          <Input
-            type="text"
-            value={downloadFolderPath || "Папка не выбрана"}
-            readOnly
-            className="flex-1 text-sm cursor-default w-full"
-            placeholder="Выберите папку для загрузки"
-          />
+          <Input type="text" value={downloadFolderPath || "Папка не выбрана"} readOnly className="flex-1 text-sm cursor-default w-full" />
           <Tooltip>
             <TooltipTrigger>
-              <Button
-                variant="outline"
-                size="sm"
-                className="p-2 h-9 w-9"
-                onClick={handleSelectFolder}
-                disabled={isDownloading}
-              >
+              <Button variant="outline" size="sm" className="p-2 h-9 w-9" onClick={handleSelectFolder} disabled={isDownloading}>
                 <Folder className="h-4 w-4" />
               </Button>
             </TooltipTrigger>
-            <TooltipContent>
-              <p>Выбрать папку</p>
-            </TooltipContent>
+            <TooltipContent><p>Выбрать папку</p></TooltipContent>
           </Tooltip>
-
           <Tooltip>
             <TooltipTrigger>
-              <Button
-                variant="outline"
-                size="sm"
-                className="p-2 h-9 w-9"
-                onClick={handleOpenFolder}
-                disabled={!downloadFolderPath}
-              >
+              <Button variant="outline" size="sm" className="p-2 h-9 w-9" onClick={handleOpenFolder} disabled={!downloadFolderPath || isDownloading}>
                 <FolderOpen className="h-4 w-4" />
               </Button>
             </TooltipTrigger>
-            <TooltipContent>
-              <p>Открыть папку</p>
-            </TooltipContent>
+            <TooltipContent><p>Открыть папку</p></TooltipContent>
           </Tooltip>
         </div>
 
-        <Button
-          variant="default"
-          className="w-auto"
-          disabled={(!getTrackMetaQuery.isSuccess || !getTrackMetaQuery.data.id) && pageType === pageTypeEnum.OTHER}
-          onClick={downloadButtonClick}
-        >
+        <Button variant="default" disabled={!isDownloading && currentTrackUnavailable} onClick={handleDownloadClick}>
           {isDownloading ? "Стоп" : "Скачать"}
         </Button>
 
         <Alert variant="default" className="cursor-default">
           <Info />
           <div className="text-sm text-muted-foreground">
-            Для загрузки всех треков артиста, плейлиста или альбома - откройте соответствующую страницу
+            Для загрузки всех треков откройте страницу нужного артиста, плейлиста или альбома.
           </div>
         </Alert>
       </div>

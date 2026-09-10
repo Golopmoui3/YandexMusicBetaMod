@@ -1,9 +1,9 @@
 declare global {
   interface Window {
     yandexMusicMod: {
-      getStorageValue: (key: string) => Promise<unknown>;
+      getStorageValue: (key: string) => Promise<any>;
       setStorageValue: (key: string, value: unknown) => Promise<void>;
-      onStorageChanged: (cb: (key: string, value: unknown) => void) => () => void;
+      onStorageChanged: (cb: (key: string, value: any) => void) => () => void;
       downloadTrack: (
         downloadInfo: unknown,
         trackMeta: unknown,

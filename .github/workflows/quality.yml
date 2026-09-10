@@ -45,3 +45,37 @@ jobs:
 
       - name: Build UI
         run: bun run ui:build
+
+  windows-build:
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+
+      - name: Build complete installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Continue"
+          & bun start 2>&1 | Tee-Object -FilePath build.log
+          $status = $LASTEXITCODE
+
+          if ($status -ne 0 -and "${{ github.event_name }}" -eq "pull_request") {
+            $body = @(
+              "## Windows installer build failed",
+              "",
+              '```text',
+              (Get-Content build.log -Tail 220),
+              '```'
+            )
+            $body | Set-Content -Path build-comment.md -Encoding utf8
+            gh pr comment "${{ github.event.pull_request.number }}" --body-file build-comment.md
+          }
+
+          exit $status

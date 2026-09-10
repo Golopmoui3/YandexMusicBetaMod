@@ -1,23 +1,22 @@
 declare global {
   interface Window {
     yandexMusicMod: {
-      getStorageValue: (key: string) => any;
-      setStorageValue: (key: string, value: any) => void;
-      onStorageChanged: (cb: Function) => void;
-      downloadTrack: (downloadInfo: any, trackMeta: any, customDownloadPath?: string) => any;
+      getStorageValue: (key: string) => Promise<any>;
+      setStorageValue: (key: string, value: unknown) => Promise<void>;
+      onStorageChanged: (cb: (key: string, value: any) => void) => () => void;
+      downloadTrack: (
+        downloadInfo: unknown,
+        trackMeta: unknown,
+        customDownloadPath?: string,
+      ) => Promise<{ ok: boolean; error?: string }>;
+      openDownloadDirectory: () => Promise<{ success: boolean; error?: string }>;
       selectDownloadFolder: () => Promise<{ success: boolean; path: string | null }>;
       openFolder: (folderPath: string) => Promise<{ success: boolean; error?: string }>;
-      axios: (config: string) => Promise<{
-        success: boolean;
-        data?: any;
-        error?: string;
-        status?: number;
-        statusText?: string;
-        headers?: any;
-      }>;
     };
     VERSION: string;
-    __getPlayerState: () => any;
+    __getPlayerState: () => unknown;
+    __yandexMusicModAnalyticsEnabled?: boolean;
+    __workers: Worker[];
   }
 }
 

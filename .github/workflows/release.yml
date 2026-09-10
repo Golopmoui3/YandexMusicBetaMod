@@ -2,14 +2,50 @@ name: release
 
 on:
   push:
-    tags: ["v*"]
+    branches: [master]
+    paths-ignore:
+      - "LAST_BUILD_VERSION"
+      - ".meta/**"
+      - "**/*.md"
   workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: yandex-music-release
+  cancel-in-progress: false
+
 jobs:
-  build-installer:
+  resolve-version:
+    runs-on: ubuntu-latest
+    outputs:
+      app_version: ${{ steps.version.outputs.app_version }}
+      mod_version: ${{ steps.version.outputs.mod_version }}
+    steps:
+      - name: Resolve release versions
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_VERSION=$(curl -fsSL \
+            --retry 3 \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+            https://music-desktop-application.s3.yandex.net/stable/latest.yml \
+            | grep -m1 '^version:' | awk '{print $2}' | tr -d '\r')
+
+          if [[ ! "$APP_VERSION" =~ ^[0-9]+(\.[0-9]+){1,3}([+-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid version from latest.yml: $APP_VERSION" >&2
+            exit 1
+          fi
+
+          MOD_VERSION="$APP_VERSION.$GITHUB_RUN_ID"
+          echo "app_version=$APP_VERSION" >> "$GITHUB_OUTPUT"
+          echo "mod_version=$MOD_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Yandex Music: $APP_VERSION | mod: $MOD_VERSION"
+
+  build-release:
+    needs: resolve-version
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
@@ -22,36 +58,113 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      # Полный пайплайн: скачать стабильную сборку Яндекс Музыки, пропатчить,
-      # собрать мод и упаковать установщик через electron-builder.
-      # winCodeSign-воркэраунд применяется сам (src/patcher/wincodesign-workaround.ts).
-      - name: Build installer
+      - name: Type-check sources
+        run: bun run typecheck
+
+      - name: Build Setup and Portable executables
+        env:
+          VITE_MOD_VERSION: ${{ needs.resolve-version.outputs.mod_version }}
         run: bun start
 
-      - name: Collect artifacts
+      - name: Collect and validate release artifacts
         shell: pwsh
         run: |
+          $version = "${{ needs.resolve-version.outputs.app_version }}"
           $out = "$env:GITHUB_WORKSPACE/artifacts"
           New-Item -ItemType Directory -Force -Path $out | Out-Null
-          Get-ChildItem -Path .versions -Recurse -Include *.exe,*.yml |
-            Where-Object { $_.FullName -notmatch 'node_modules' } |
-            Copy-Item -Destination $out
-          Get-ChildItem $out
 
-      - name: Checksums
+          $setups = @(Get-ChildItem -Path .versions -Recurse -File -Filter "Setup.$version.exe" |
+            Where-Object { $_.FullName -notmatch 'node_modules' })
+          $portables = @(Get-ChildItem -Path .versions -Recurse -File -Filter "Portable.$version.exe" |
+            Where-Object { $_.FullName -notmatch 'node_modules' })
+          if ($setups.Count -ne 1) { throw "Expected one Setup executable, found $($setups.Count)" }
+          if ($portables.Count -ne 1) { throw "Expected one Portable executable, found $($portables.Count)" }
+
+          Copy-Item $setups[0].FullName -Destination $out -Force
+          Copy-Item $portables[0].FullName -Destination $out -Force
+          Get-ChildItem $out | Format-Table Name, Length
+
+      - name: Create SHA-256 checksums
         shell: pwsh
         run: |
-          Get-ChildItem ./artifacts/*.exe | ForEach-Object {
-            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
-            "$hash  $($_.Name)" | Out-File ./artifacts/SHASUMS256.txt -Append
+          $checksumFile = "./artifacts/SHASUMS256.txt"
+          Remove-Item $checksumFile -Force -ErrorAction SilentlyContinue
+          $executables = @(Get-ChildItem ./artifacts/*.exe -File | Sort-Object Name)
+          if ($executables.Count -ne 2) { throw "Expected two executables to checksum, found $($executables.Count)" }
+          foreach ($executable in $executables) {
+            $hash = (Get-FileHash $executable.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($executable.Name)" | Out-File $checksumFile -Append -Encoding utf8
           }
-          Get-Content ./artifacts/SHASUMS256.txt
+          Get-Content $checksumFile
 
-      - name: Attach to release
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: app-${{ needs.resolve-version.outputs.mod_version }}
+          target_commitish: ${{ github.sha }}
+          name: "Yandex Music Mod ${{ needs.resolve-version.outputs.mod_version }}"
+          body: |
+            Проверенная релизная сборка Yandex Music Mod поверх стабильной версии Яндекс Музыки.
+
+            - Версия мода: **${{ needs.resolve-version.outputs.mod_version }}**
+            - Версия приложения: **${{ needs.resolve-version.outputs.app_version }}**
+            - `Setup.${{ needs.resolve-version.outputs.app_version }}.exe` — установщик Windows
+            - `Portable.${{ needs.resolve-version.outputs.app_version }}.exe` — переносимая версия без установки
+            - `SHASUMS256.txt` — контрольные суммы SHA-256
           files: |
-            artifacts/*.exe
+            artifacts/Setup.${{ needs.resolve-version.outputs.app_version }}.exe
+            artifacts/Portable.${{ needs.resolve-version.outputs.app_version }}.exe
             artifacts/SHASUMS256.txt
+          fail_on_unmatched_files: true
+          overwrite_files: true
+          make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Remove stale release assets and verify publication
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $appVersion = "${{ needs.resolve-version.outputs.app_version }}"
+          $tag = "app-${{ needs.resolve-version.outputs.mod_version }}"
+          $allowed = @("Setup.$appVersion.exe", "Portable.$appVersion.exe", "SHASUMS256.txt")
+          $release = gh release view $tag --repo Golopmoui3/YandexMusicBetaMod --json assets | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "Unable to read release $tag" }
+
+          foreach ($asset in $release.assets) {
+            if ($allowed -notcontains $asset.name) {
+              gh release delete-asset $tag $asset.name --repo Golopmoui3/YandexMusicBetaMod --yes
+              if ($LASTEXITCODE -ne 0) { throw "Unable to remove stale asset $($asset.name)" }
+            }
+          }
+
+          $published = (gh release view $tag --repo Golopmoui3/YandexMusicBetaMod --json assets | ConvertFrom-Json).assets.name
+          foreach ($name in $allowed) {
+            if ($published -notcontains $name) { throw "Release asset is missing: $name" }
+          }
+          if (@($published).Count -ne $allowed.Count) {
+            throw "Unexpected release assets remain: $($published -join ', ')"
+          }
+          "Published assets: $($published -join ', ')"
+
+      - name: Record successful release
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_VERSION="${{ needs.resolve-version.outputs.app_version }}"
+          MOD_VERSION="${{ needs.resolve-version.outputs.mod_version }}"
+          printf '%s\n' "$APP_VERSION" > LAST_BUILD_VERSION
+          cat > .meta/meta.json <<EOF
+          {
+            "modStable": "$MOD_VERSION",
+            "downloadUrl": "https://github.com/Golopmoui3/YandexMusicBetaMod/releases/latest"
+          }
+          EOF
+
+          git config user.name "Golopmoui3"
+          git config user.email "Golopmoui3@users.noreply.github.com"
+          git add LAST_BUILD_VERSION .meta/meta.json
+          git commit -m "chore: publish mod $MOD_VERSION for Yandex Music $APP_VERSION [skip ci]" || exit 0
+          git pull --rebase origin master
+          git push origin HEAD:master

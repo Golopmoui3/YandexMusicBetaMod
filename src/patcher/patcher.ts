@@ -152,9 +152,15 @@ export async function processBuild(build: AppBuild): Promise<string[]> {
   );
   packageJsonContents.name = "YandexMusicMod";
   packageJsonContents.author = "Golopmoui3 [github.com/Golopmoui3]";
+  packageJsonContents.repository = {
+    type: "git",
+    url: "https://github.com/Golopmoui3/YandexMusicBetaMod.git",
+  };
   packageJsonContents.build = {
     appId: "ru.yandex.desktop.music.mod",
     productName: "Яндекс Музыка",
+    artifactName: "Setup.${version}.${ext}",
+    publish: [{ provider: "github", owner: "Golopmoui3", repo: "YandexMusicBetaMod" }],
     win: {
       icon: "assets/icon.ico",
       requestedExecutionLevel: "requireAdministrator",
@@ -209,9 +215,6 @@ export async function processBuild(build: AppBuild): Promise<string[]> {
     "web preferences",
   );
 
-  // Keep Electron's same-origin and CORS protections enabled. The previous
-  // patch changed this to false for every window, exposing privileged APIs to
-  // any remote content loaded by the application.
   if (!/webSecurity:\s*true/.test(indexJsContents)) fail("Expected webSecurity: true in index.js");
   if (/webSecurity:\s*false/.test(indexJsContents)) fail("Refusing to build with webSecurity disabled");
 
@@ -359,7 +362,7 @@ export async function processBuild(build: AppBuild): Promise<string[]> {
   logProgress("🛠️  Building modded application");
   await $`bun install`.cwd(buildModdedDir);
   await applyWincodesignWorkaround();
-  await $`bunx electron-builder`.cwd(buildModdedDir);
+  await $`bunx electron-builder --publish never`.cwd(buildModdedDir);
   logProgress("✔️   Done");
 
   return progress;

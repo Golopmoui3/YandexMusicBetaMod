@@ -2,307 +2,272 @@ const electron = require("electron");
 const fs = require("fs");
 const path = require("path");
 const process = require("process");
+const { randomUUID } = require("crypto");
+const { execFile } = require("child_process");
 const sanitize = require("sanitize-filename");
 const axios = require("axios");
 
-// ffmpeg-static (либа которая бандлит бинарники ffmpeg)
-const pathToFfmpeg = require("ffmpeg-static").replaceAll("app.asar", "app.asar.unpacked");
-const { exec } = require("child_process");
-console.log("bundled ffmpeg binary path:", pathToFfmpeg);
+const ffmpegBinary = require("ffmpeg-static");
+if (typeof ffmpegBinary !== "string" || ffmpegBinary.length === 0) {
+  throw new Error("ffmpeg-static did not provide a binary for this platform");
+}
+const pathToFfmpeg = ffmpegBinary.replaceAll("app.asar", "app.asar.unpacked");
 
 const appFolder = electron.app.getPath("userData");
 const settingsFilePath = path.join(appFolder, "mod_settings.json");
 const defaultDownloadPath = path.join(appFolder, "Downloads");
+const MAX_SETTING_VALUE_BYTES = 25 * 1024 * 1024;
+const FORBIDDEN_SETTING_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
-// Создание папки для хранения настроек пользователя
-fs.mkdir(appFolder, { recursive: true }, (err) => {
-  if (err) return console.error(err);
-  console.log("mod_settings directory created successfully!");
-});
+fs.mkdirSync(appFolder, { recursive: true });
+fs.mkdirSync(defaultDownloadPath, { recursive: true });
 
-// Создание папки для загрузки треков
-fs.mkdir(defaultDownloadPath, { recursive: true }, (err) => {
-  if (err) return console.error(err);
-  console.log("Default download directory created successfully!");
-});
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
 
-if (!fs.existsSync(settingsFilePath)) {
-  // Initialize settings with default download path on first run
-  const initialSettings = {
-    downloadFolderPath: defaultDownloadPath,
-  };
-  fs.writeFileSync(settingsFilePath, JSON.stringify(initialSettings, null, 2));
-} else {
+function readSettings() {
   try {
-    const settings = JSON.parse(fs.readFileSync(settingsFilePath, "utf8"));
-    // Set default download path if not already set
-    if (!settings.downloadFolderPath) {
-      settings.downloadFolderPath = defaultDownloadPath;
-      fs.writeFileSync(settingsFilePath, JSON.stringify(settings, null, 2));
-    }
-  } catch (e) {
-    // If settings file is corrupted, recreate with defaults
-    const initialSettings = {
-      downloadFolderPath: defaultDownloadPath,
-    };
-    fs.writeFileSync(settingsFilePath, JSON.stringify(initialSettings, null, 2));
+    if (!fs.existsSync(settingsFilePath)) return {};
+    const parsed = JSON.parse(fs.readFileSync(settingsFilePath, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch (error) {
+    console.warn("Failed to read mod settings, restoring defaults:", errorMessage(error));
+    return {};
   }
 }
 
-// window API - запрос настроек пользователя
-electron.ipcMain.handle("yandexMusicMod.getStorageValue", (_ev, key) => {
-  const settings = fs.readFileSync(settingsFilePath, "utf8") || "{}";
-  const parsed = JSON.parse(settings);
-  return parsed[key] !== undefined ? parsed[key] : null;
+function writeSettings(settings) {
+  fs.writeFileSync(settingsFilePath, JSON.stringify(settings, null, 2), "utf8");
+}
+
+function validateSettingKey(key) {
+  if (typeof key !== "string" || key.length === 0 || key.length > 200 || FORBIDDEN_SETTING_KEYS.has(key)) {
+    throw new TypeError("Invalid settings key");
+  }
+}
+
+function validateSettingValue(value) {
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined) throw new TypeError("Setting value is not JSON-serializable");
+  if (Buffer.byteLength(serialized, "utf8") > MAX_SETTING_VALUE_BYTES) {
+    throw new RangeError("Setting value is too large");
+  }
+}
+
+const initialSettings = readSettings();
+if (!initialSettings.downloadFolderPath) initialSettings.downloadFolderPath = defaultDownloadPath;
+writeSettings(initialSettings);
+
+function isAllowedYandexHost(hostname) {
+  const host = hostname.toLowerCase();
+  return ["yandex.net", "yandex.ru", "yandex.com"].some((domain) => host === domain || host.endsWith(`.${domain}`));
+}
+
+function parseYandexHttpsUrl(rawUrl) {
+  if (typeof rawUrl !== "string" || rawUrl.length === 0) throw new TypeError("URL is missing");
+  const url = new URL(rawUrl);
+  if (url.protocol !== "https:" || !isAllowedYandexHost(url.hostname)) {
+    throw new TypeError("Only HTTPS URLs on Yandex domains are allowed");
+  }
+  return url.toString();
+}
+
+function validateDirectoryPath(folderPath, { mustExist = false } = {}) {
+  if (typeof folderPath !== "string" || !path.isAbsolute(folderPath)) {
+    throw new TypeError("Directory path must be absolute");
+  }
+  if (mustExist && (!fs.existsSync(folderPath) || !fs.statSync(folderPath).isDirectory())) {
+    throw new TypeError("Directory does not exist");
+  }
+  return path.resolve(folderPath);
+}
+
+function runFfmpeg(args) {
+  return new Promise((resolve, reject) => {
+    execFile(
+      pathToFfmpeg,
+      args,
+      { windowsHide: true, maxBuffer: 10 * 1024 * 1024 },
+      (error, _stdout, stderr) => {
+        if (error) {
+          const details = String(stderr || error.message).trim();
+          reject(new Error(`FFmpeg failed: ${details}`));
+          return;
+        }
+        resolve();
+      },
+    );
+  });
+}
+
+electron.ipcMain.handle("yandexMusicMod.getStorageValue", (_event, key) => {
+  validateSettingKey(key);
+  const settings = readSettings();
+  return settings[key] !== undefined ? settings[key] : null;
 });
 
-// window API - установка настроек пользователя
-electron.ipcMain.on("yandexMusicMod.setStorageValue", (_ev, key, value) => {
-  const settings = JSON.parse(fs.readFileSync(settingsFilePath, "utf8"));
+electron.ipcMain.handle("yandexMusicMod.setStorageValue", (_event, key, value) => {
+  validateSettingKey(key);
+  validateSettingValue(value);
+
+  const settings = readSettings();
   settings[key] = value;
-  fs.writeFileSync(settingsFilePath, JSON.stringify(settings, null, 2));
+  writeSettings(settings);
 
-  electron.BrowserWindow.getAllWindows().forEach((window) =>
-    window.webContents.send("yandexMusicMod.storageValueUpdated", key, value),
-  );
+  electron.BrowserWindow.getAllWindows().forEach((window) => {
+    if (!window.isDestroyed()) window.webContents.send("yandexMusicMod.storageValueUpdated", key, value);
+  });
 });
 
-// window API - выбор папки для загрузки треков
-electron.ipcMain.handle("yandexMusicMod.selectDownloadFolder", async (_ev) => {
+electron.ipcMain.handle("yandexMusicMod.selectDownloadFolder", async () => {
   const result = await electron.dialog.showOpenDialog({
     properties: ["openDirectory"],
     title: "Выберите папку для загрузки треков",
   });
 
-  if (result.canceled || !result.filePaths.length) {
-    return { success: false, path: null };
-  }
-
-  return { success: true, path: result.filePaths[0] };
+  if (result.canceled || result.filePaths.length === 0) return { success: false, path: null };
+  return { success: true, path: validateDirectoryPath(result.filePaths[0], { mustExist: true }) };
 });
 
-// window API - открытие папки для загрузки треков
-electron.ipcMain.handle("yandexMusicMod.openFolder", async (_ev, folderPath) => {
+electron.ipcMain.handle("yandexMusicMod.openFolder", async (_event, folderPath) => {
   try {
-    await electron.shell.openPath(folderPath);
-    return { success: true };
+    const safePath = validateDirectoryPath(folderPath, { mustExist: true });
+    const openError = await electron.shell.openPath(safePath);
+    return openError ? { success: false, error: openError } : { success: true };
   } catch (error) {
-    console.error("Failed to open folder:", error);
-    return { success: false, error: error.message };
+    return { success: false, error: errorMessage(error) };
   }
 });
 
-// window API - загрузка трека
 electron.ipcMain.handle(
   "yandexMusicMod.downloadTrack",
-  async (_ev, downloadInfo, trackMeta, customDownloadPath = null) => {
-    console.log("Backend get download request: ", downloadInfo.url);
-
-    let saveFolder;
-    if (process.platform === "win32") {
-      saveFolder = process.env.USERPROFILE + "\\YandexMod Download";
-    } else {
-      saveFolder = (process.env.HOME || process.env.USERPROFILE) + "/YandexMod Download";
-    }
-
-    if (customDownloadPath) {
-      saveFolder = customDownloadPath;
-    } else {
-      try {
-        const settings = JSON.parse(fs.readFileSync(settingsFilePath, "utf8"));
-        saveFolder = settings.downloadFolderPath || saveFolder;
-      } catch (e) {
-        console.error("Failed to parse settings:", e);
-      }
-    }
-
-    if (!fs.existsSync(saveFolder)) {
-      fs.mkdirSync(saveFolder, { recursive: true });
-    }
-
-    // Generate filename from trackMeta or use default
-    const fileExtension = downloadInfo.codec.includes("flac") ? "flac" : "mp3";
-    const trackFileName = sanitize(
-      `${trackMeta.artists.map((a) => a.name).join(", ")} - ${trackMeta.title} ${trackMeta.version || ""}`,
-    )
-      .trim()
-      .substring(0, 250);
-    const trackFilePath = path.join(saveFolder, `${trackFileName}.${fileExtension}`);
-    const trackTempFilePath = path.join(saveFolder, `${Math.random().toString(36).substring(2, 7)}.${fileExtension}`);
-    const trackCoverPath = path.join(saveFolder, `${trackFileName}.jpg`);
+  async (_event, downloadInfo, trackMeta, customDownloadPath = null) => {
+    let trackTempFilePath = null;
+    let trackCoverPath = null;
 
     try {
-      // Download file using axios with arraybuffer response type
-      const response = await axios.get(downloadInfo.url, {
+      if (!downloadInfo || typeof downloadInfo !== "object") throw new TypeError("Invalid download info");
+      if (!trackMeta || typeof trackMeta !== "object") throw new TypeError("Invalid track metadata");
+      if (typeof downloadInfo.key !== "string" || typeof downloadInfo.codec !== "string") {
+        throw new TypeError("Download key or codec is missing");
+      }
+
+      const downloadUrl = parseYandexHttpsUrl(downloadInfo.url);
+      const settings = readSettings();
+      const configuredPath = customDownloadPath || settings.downloadFolderPath || defaultDownloadPath;
+      const saveFolder = validateDirectoryPath(configuredPath);
+      fs.mkdirSync(saveFolder, { recursive: true });
+
+      const artists = Array.isArray(trackMeta.artists)
+        ? trackMeta.artists.map((artist) => String(artist?.name || "")).filter(Boolean)
+        : [];
+      const title = typeof trackMeta.title === "string" && trackMeta.title.trim() ? trackMeta.title.trim() : "Unknown track";
+      const version = typeof trackMeta.version === "string" ? trackMeta.version.trim() : "";
+      const fallbackName = `track-${String(trackMeta.id || Date.now())}`;
+      const trackFileName =
+        sanitize(`${artists.join(", ")} - ${title}${version ? ` ${version}` : ""}`).trim().slice(0, 180) || fallbackName;
+      const fileExtension = downloadInfo.codec.toLowerCase().includes("flac") ? "flac" : "mp3";
+      const trackFilePath = path.join(saveFolder, `${trackFileName}.${fileExtension}`);
+      trackTempFilePath = path.join(saveFolder, `.${randomUUID()}.${fileExtension}`);
+      trackCoverPath = path.join(saveFolder, `.${randomUUID()}.jpg`);
+
+      const response = await axios.get(downloadUrl, {
         responseType: "arraybuffer",
-        validateStatus: () => true, // Following neverthrow integration pattern
+        timeout: 60_000,
+        maxContentLength: 1024 * 1024 * 1024,
+        validateStatus: () => true,
       });
+      if (response.status !== 200) throw new Error(`Download failed with HTTP ${response.status}`);
 
-      if (response.status !== 200) {
-        console.error(`Download failed with status: ${response.status}`);
-        return { ok: false, error: "Download failed" };
-      }
-
-      // Decrypt the data using the decryptYandexAudio function
       const decryptedData = await decryptYandexAudio(response.data, downloadInfo.key);
+      await fs.promises.writeFile(trackFilePath, Buffer.from(decryptedData));
 
-      // Write decrypted data to file
-      fs.writeFile(trackFilePath, Buffer.from(decryptedData), (err) => {
-        if (err) {
-          console.error("Error saving decrypted file:", err);
-          return { ok: false, error: "Error saving decrypted file: " + err };
-        }
-        console.log("Download and Decryption Completed");
-      });
+      await runFfmpeg(["-hide_banner", "-loglevel", "error", "-i", trackFilePath, "-y", trackTempFilePath]);
 
-      // 2. Copy/reencode audio using direct ffmpeg command
-      await new Promise((resolve, reject) => {
-        const ffmpegArgs = ["-i", JSON.stringify(trackFilePath), "-y", JSON.stringify(trackTempFilePath)];
-        const command = `${JSON.stringify(pathToFfmpeg)} ${ffmpegArgs.join(" ")}`;
+      const ffmpegArgs = ["-hide_banner", "-loglevel", "error", "-i", trackTempFilePath];
+      let hasCover = false;
 
-        console.log("Executing FFmpeg command:", command);
-
-        exec(command, (error, stdout, stderr) => {
-          if (error) {
-            console.error("FFmpeg stderr:", stderr);
-            console.error("FFmpeg error:", error);
-            reject(new Error(`FFmpeg process failed. Command: ${command}. Error: ${error.message}`));
-          } else {
-            resolve();
-          }
-        });
-      });
-
-      // Build ffmpeg arguments for adding metadata and cover
-      const ffmpegArgs = ["-i", JSON.stringify(trackTempFilePath)];
-
-      // === Download cover art ===
-      if (trackMeta.coverUri) {
+      if (typeof trackMeta.coverUri === "string" && trackMeta.coverUri.length > 0) {
         try {
-          const url = `https://${trackMeta.coverUri.replaceAll("%%", "orig")}`;
-          const coverResponse = await axios.get(url, { responseType: "arraybuffer" });
-          fs.writeFileSync(trackCoverPath, coverResponse.data);
-
-          ffmpegArgs.push("-i", JSON.stringify(trackCoverPath));
-          ffmpegArgs.push("-map", "0:a", "-map", "1:v", "-y");
-        } catch (err) {
-          console.warn("Failed to download cover art:", err);
+          const coverUrl = parseYandexHttpsUrl(`https://${trackMeta.coverUri.replaceAll("%%", "orig")}`);
+          const coverResponse = await axios.get(coverUrl, {
+            responseType: "arraybuffer",
+            timeout: 30_000,
+            validateStatus: () => true,
+          });
+          if (coverResponse.status === 200) {
+            await fs.promises.writeFile(trackCoverPath, coverResponse.data);
+            ffmpegArgs.push("-i", trackCoverPath, "-map", "0:a:0", "-map", "1:v:0", "-disposition:v:0", "attached_pic");
+            hasCover = true;
+          }
+        } catch (error) {
+          console.warn("Failed to download cover art:", errorMessage(error));
         }
       }
 
-      // Add metadata
-      ffmpegArgs.push("-c", "copy");
-      ffmpegArgs.push("-id3v2_version", "3");
+      if (!hasCover) ffmpegArgs.push("-map", "0:a:0");
+      ffmpegArgs.push("-c", "copy", "-id3v2_version", "3");
 
-      if (trackMeta.title) {
-        ffmpegArgs.push("-metadata", JSON.stringify(`title=${trackMeta.title}`));
-      }
-      if (trackMeta.version) {
-        ffmpegArgs.push("-metadata", JSON.stringify(`subtitle=${trackMeta.version}`));
-      }
-      if (trackMeta.artists && trackMeta.artists.length > 0) {
-        ffmpegArgs.push("-metadata", JSON.stringify(`artist=${trackMeta.artists.map((a) => a.name).join("/")}`));
-      }
-      if (trackMeta.albums?.[0]?.title) {
-        ffmpegArgs.push("-metadata", JSON.stringify(`album=${trackMeta.albums[0].title}`));
-      }
-      if (trackMeta.albums?.[0]?.genre) {
-        ffmpegArgs.push("-metadata", JSON.stringify(`genre=${trackMeta.albums[0].genre}`));
-      }
-      if (trackMeta.albums?.[0]?.trackPosition?.index) {
-        ffmpegArgs.push("-metadata", JSON.stringify(`track=${trackMeta.albums[0].trackPosition.index}`));
-      }
-      if (trackMeta.albums?.[0]?.year) {
-        ffmpegArgs.push("-metadata", JSON.stringify(`date=${trackMeta.albums[0].year}`));
-      }
-      if (trackMeta.albums?.[0]?.releaseDate) {
-        ffmpegArgs.push("-metadata", JSON.stringify(`releaseDate=${trackMeta.albums[0].releaseDate}`));
-      }
-      ffmpegArgs.push("-metadata", JSON.stringify("encoded_by=yandexMusicMod"));
+      const addMetadata = (key, value) => {
+        if (value !== undefined && value !== null && String(value).length > 0) {
+          ffmpegArgs.push("-metadata", `${key}=${String(value)}`);
+        }
+      };
 
-      ffmpegArgs.push(JSON.stringify(trackFilePath));
+      addMetadata("title", title);
+      addMetadata("subtitle", version);
+      addMetadata("artist", artists.join("/"));
+      addMetadata("album", trackMeta.albums?.[0]?.title);
+      addMetadata("genre", trackMeta.albums?.[0]?.genre);
+      addMetadata("track", trackMeta.albums?.[0]?.trackPosition?.index);
+      addMetadata("date", trackMeta.albums?.[0]?.year);
+      addMetadata("releaseDate", trackMeta.albums?.[0]?.releaseDate);
+      addMetadata("encoded_by", "yandexMusicMod");
 
-      console.log("ffmpegArgs", ffmpegArgs);
+      ffmpegArgs.push("-y", trackFilePath);
+      await runFfmpeg(ffmpegArgs);
 
-      // Execute ffmpeg command to add metadata and cover
-      await new Promise((resolve, reject) => {
-        const command = `${pathToFfmpeg} ${ffmpegArgs.join(" ")}`;
-
-        console.log("Executing FFmpeg metadata command:", command);
-
-        exec(command, (error, stdout, stderr) => {
-          if (error) {
-            console.error("FFmpeg metadata stderr:", stderr);
-            console.error("FFmpeg metadata error:", error);
-            reject(new Error(`FFmpeg metadata process failed. Command: ${command}. Error: ${error.message}`));
-          } else {
-            // Clean up temporary files
-            if (fs.existsSync(trackTempFilePath)) {
-              fs.unlinkSync(trackTempFilePath);
-            }
-
-            resolve();
+      return { ok: true };
+    } catch (error) {
+      console.error("Download or decryption failed:", errorMessage(error));
+      return { ok: false, error: errorMessage(error) };
+    } finally {
+      for (const temporaryPath of [trackTempFilePath, trackCoverPath]) {
+        if (temporaryPath && fs.existsSync(temporaryPath)) {
+          try {
+            fs.unlinkSync(temporaryPath);
+          } catch (error) {
+            console.warn("Failed to remove temporary file:", errorMessage(error));
           }
-        });
-
-        console.log("Download completed.");
-      });
-    } catch (err) {
-      console.error("Download or decryption failed:", err);
-      return { ok: false, error: "Download or decryption failed: " + err };
+        }
+      }
     }
-
-    return { ok: true };
   },
 );
 
-// window API - открытие папки для загрузки треков
-electron.ipcMain.on("yandexMusicMod.openDownloadDirectory", async (_ev) => {
-  let saveFolder;
-  if (process.platform === "win32") {
-    saveFolder = process.env.USERPROFILE + "\\YandexMod Download";
-  } else {
-    saveFolder = (process.env.HOME || process.env.USERPROFILE) + "/YandexMod Download";
-  }
-
+electron.ipcMain.handle("yandexMusicMod.openDownloadDirectory", async () => {
   try {
-    const settings = JSON.parse(fs.readFileSync(settingsFilePath, "utf8"));
-    saveFolder = settings.downloadFolderPath || saveFolder;
-  } catch (e) {
-    console.log("failed to parse settings", e);
+    const settings = readSettings();
+    const saveFolder = validateDirectoryPath(settings.downloadFolderPath || defaultDownloadPath);
+    fs.mkdirSync(saveFolder, { recursive: true });
+    const openError = await electron.shell.openPath(saveFolder);
+    return openError ? { success: false, error: openError } : { success: true };
+  } catch (error) {
+    return { success: false, error: errorMessage(error) };
   }
-
-  await electron.shell.openPath(saveFolder);
 });
 
-// window API - универсальный axios запрос
-electron.ipcMain.handle("yandexMusicMod.axios", async (_ev, config) => {
-  const client = axios.create({
-    validateStatus: () => true,
-  });
-
-  const response = await client(config);
-
-  return {
-    success: true,
-    data: response.data,
-    status: response.status,
-    statusText: response.statusText,
-    headers: response.headers,
-  };
-});
-
-// Функция для расшифровки зашифрованного трека
 async function decryptYandexAudio(encryptedData, secretKey) {
-  const hexToUint8Array = (hexString) => new Uint8Array(hexString.match(/.{1,2}/g).map((byte) => parseInt(byte, 16)));
-  const cryptoKey = await crypto.subtle.importKey("raw", hexToUint8Array(secretKey), { name: "AES-CTR" }, false, [
-    "encrypt",
-    "decrypt",
-  ]);
+  if (!/^(?:[0-9a-fA-F]{2})+$/.test(secretKey)) throw new TypeError("Invalid audio decryption key");
+  const bytes = secretKey.match(/.{1,2}/g);
+  if (!bytes) throw new TypeError("Invalid audio decryption key");
 
-  let counter = new Uint8Array(16);
+  const keyData = new Uint8Array(bytes.map((byte) => Number.parseInt(byte, 16)));
+  const cryptoKey = await crypto.subtle.importKey("raw", keyData, { name: "AES-CTR" }, false, ["decrypt"]);
+  const counter = new Uint8Array(16);
   return crypto.subtle.decrypt({ name: "AES-CTR", counter, length: 128 }, cryptoKey, encryptedData);
 }
 
-// Discord RPC (из-за того, что main.js не бандлится а просто добавляется в оригинальный index.js, все импорты приходится делать вручную. Строчка ниже просто заменится на содержимое файла src\mod\features\utils\discordRPC.js)
+// Replaced by the patcher with src/mod/features/utils/discordRPC.js.
 mod_require("discordRPC");

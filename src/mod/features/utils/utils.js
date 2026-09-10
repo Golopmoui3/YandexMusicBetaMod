@@ -1,108 +1,112 @@
 const YandexApiOnRequestHandlers = [];
 const YandexApiOnResponseHandlers = [];
-const originalFetch = window.fetch;
+const originalFetch = window.fetch.bind(window);
+let interceptorInitialized = false;
 
-// отключить попытку отправки аналитики. Она и так заблочена, но без этого будет сыпать ошибками в консоль
-navigator.sendBeacon = function (...args) {
+// Analytics endpoints are intentionally disabled by the mod.
+navigator.sendBeacon = function () {
   return true;
 };
 
-(function () {
+(function blockAnalyticsScripts() {
   const originalAppendChild = document.head.appendChild;
 
   document.head.appendChild = function (element) {
-    // Проверяем, что это script элемент
     if (element instanceof HTMLScriptElement) {
       const src = element.src || "";
-
-      // Проверяем URL
-      if (
-        src.includes("https://yandex.ru/ads/system/adsdk.js") ||
-        src.includes("https://mc.yandex.ru/metrika/tag.js")
-      ) {
-        console.log("Заблокирована попытка добавить Yandex скрипт:", src);
-        return true; // Возвращаем true как указано в требованиях
+      if (src.includes("https://yandex.ru/ads/system/adsdk.js") || src.includes("https://mc.yandex.ru/metrika/tag.js")) {
+        console.log("Blocked Yandex analytics script:", src);
+        return element;
       }
     }
 
-    // Для всех остальных элементов используем оригинальный метод
     return originalAppendChild.call(this, element);
   };
 })();
 
-export function initFetchInterceptor() {
-  window.fetch = function (...args) {
-    var request = [...args][0];
+function resolveRequestUrl(input) {
+  if (input instanceof Request) return input.url;
+  if (input instanceof URL) return input.href;
+  if (typeof input === "string") return new URL(input, window.location.href).href;
+  return "";
+}
 
-    // отключить попытку отправки аналитики. Она и так заблочена, но без этого будет сыпать ошибками в консоль
-    if (
-      request &&
-      request.url &&
-      (request.url.includes("log.strm.yandex.ru") ||
-        request.url.includes("api.music.yandex.net/dynamic-pages/trigger/polling"))
-    ) {
-      return new Promise((resolve) => resolve(new Response()));
+function isBlockedAnalyticsUrl(url) {
+  return url.includes("log.strm.yandex.ru") || url.includes("api.music.yandex.net/dynamic-pages/trigger/polling");
+}
+
+export function initFetchInterceptor() {
+  if (interceptorInitialized) return;
+  interceptorInitialized = true;
+
+  window.fetch = async function (input, init) {
+    const url = resolveRequestUrl(input);
+
+    if (isBlockedAnalyticsUrl(url)) {
+      return new Response(null, { status: 204 });
     }
 
-    if (request && request.url && request.url.startsWith("https://api.music.yandex.net"))
-      return yandexApiFetch(...args);
+    if (url.startsWith("https://api.music.yandex.net")) {
+      const request = input instanceof Request ? new Request(input, init) : new Request(url, init);
+      return yandexApiFetch(request);
+    }
 
-    return originalFetch(...args);
+    return originalFetch(input, init);
   };
 }
 
-const yandexApiFetch = async function (...args) {
-  let [resource, config] = args;
+async function yandexApiFetch(initialRequest) {
+  let request = initialRequest;
 
-  console.log(`[YandexApiFetch] new request: ${resource.url}`, resource.headers);
-
-  if (YandexApiOnRequestHandlers.find((x) => resource.url.includes(x.url))) {
-    for (var i = 0; i < YandexApiOnRequestHandlers.length; i++) {
-      if (!resource.url.includes(YandexApiOnRequestHandlers[i].url)) continue;
-      var requestOverride = await YandexApiOnRequestHandlers[i].handler(resource);
-      if (!requestOverride) continue;
-      args.resource = requestOverride;
-      resource = requestOverride;
+  for (const entry of YandexApiOnRequestHandlers) {
+    if (!request.url.includes(entry.url)) continue;
+    const override = await entry.handler(request);
+    if (override !== undefined && override !== null) {
+      request = override instanceof Request ? override : new Request(override, request);
     }
   }
 
-  if (YandexApiOnResponseHandlers.find((x) => resource.url.includes(x.url))) {
-    const response = await originalFetch(resource);
-    const clonedResponse = response.clone();
-    const data = await clonedResponse.json();
+  const matchingResponseHandlers = YandexApiOnResponseHandlers.filter((entry) => request.url.includes(entry.url));
+  if (matchingResponseHandlers.length === 0) return originalFetch(request);
 
-    let resp = data;
+  const response = await originalFetch(request);
+  let data;
 
-    for (var i = 0; i < YandexApiOnResponseHandlers.length; i++) {
-      if (resource.url.includes(YandexApiOnResponseHandlers[i].url)) {
-        resp = await YandexApiOnResponseHandlers[i].handler({
-          url: resource.url,
-          data: resp,
-        });
-      }
-    }
-
-    if (resp) {
-      const modifiedResponse = new Response(JSON.stringify(resp));
-      return modifiedResponse;
-    }
-
-    return new Response(JSON.stringify(data));
+  try {
+    data = await response.clone().json();
+  } catch {
+    return response;
   }
 
-  return originalFetch(resource);
-};
+  let modifiedData = data;
+  let wasModified = false;
 
-export const onYandexApiRequest = function (urlMatch, handler) {
-  YandexApiOnRequestHandlers.push({
-    url: urlMatch,
-    handler: handler,
-  });
-};
+  for (const entry of matchingResponseHandlers) {
+    const nextValue = await entry.handler({ url: request.url, data: modifiedData });
+    if (nextValue !== undefined) {
+      modifiedData = nextValue;
+      wasModified = true;
+    }
+  }
 
-export const onYandexApiResponse = function (urlMatch, handler) {
-  YandexApiOnResponseHandlers.push({
-    url: urlMatch,
-    handler: handler,
+  if (!wasModified) return response;
+
+  const headers = new Headers(response.headers);
+  headers.set("content-type", "application/json; charset=utf-8");
+  headers.delete("content-length");
+  headers.delete("content-encoding");
+
+  return new Response(JSON.stringify(modifiedData), {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
   });
-};
+}
+
+export function onYandexApiRequest(urlMatch, handler) {
+  YandexApiOnRequestHandlers.push({ url: urlMatch, handler });
+}
+
+export function onYandexApiResponse(urlMatch, handler) {
+  YandexApiOnResponseHandlers.push({ url: urlMatch, handler });
+}

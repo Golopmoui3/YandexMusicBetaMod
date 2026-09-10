@@ -2,14 +2,22 @@ name: release
 
 on:
   push:
-    tags: ["v*"]
+    branches: [master]
+    paths-ignore:
+      - "LAST_BUILD_VERSION"
+      - ".meta/**"
+      - "**/*.md"
   workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: yandex-music-release
+  cancel-in-progress: false
+
 jobs:
-  build-installer:
+  build-release:
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
@@ -25,37 +33,93 @@ jobs:
       - name: Type-check sources
         run: bun run typecheck
 
-      - name: Build installer
+      - name: Build Setup and Portable executables
         run: bun start
 
-      - name: Collect installer
+      - name: Collect and validate release artifacts
+        id: artifacts
         shell: pwsh
         run: |
           $out = "$env:GITHUB_WORKSPACE/artifacts"
           New-Item -ItemType Directory -Force -Path $out | Out-Null
-          $installers = @(Get-ChildItem -Path .versions -Recurse -File -Filter "Setup*.exe" |
+
+          $setups = @(Get-ChildItem -Path .versions -Recurse -File -Filter "Setup.*.exe" |
             Where-Object { $_.FullName -notmatch 'node_modules' })
-          if ($installers.Count -eq 0) { throw "Installer was not produced" }
-          foreach ($installer in $installers) {
-            Copy-Item $installer.FullName -Destination $out -Force
+          $portables = @(Get-ChildItem -Path .versions -Recurse -File -Filter "Portable.*.exe" |
+            Where-Object { $_.FullName -notmatch 'node_modules' })
+          if ($setups.Count -ne 1) { throw "Expected one Setup executable, found $($setups.Count)" }
+          if ($portables.Count -ne 1) { throw "Expected one Portable executable, found $($portables.Count)" }
+
+          $setupVersion = $setups[0].BaseName.Substring("Setup.".Length)
+          $portableVersion = $portables[0].BaseName.Substring("Portable.".Length)
+          if ($setupVersion -ne $portableVersion) {
+            throw "Artifact version mismatch: Setup=$setupVersion, Portable=$portableVersion"
           }
 
-      - name: Checksums
+          Copy-Item $setups[0].FullName -Destination $out -Force
+          Copy-Item $portables[0].FullName -Destination $out -Force
+          "version=$setupVersion" >> $env:GITHUB_OUTPUT
+          Get-ChildItem $out | Format-Table Name, Length
+
+      - name: Create SHA-256 checksums
         shell: pwsh
         run: |
           $checksumFile = "./artifacts/SHASUMS256.txt"
           Remove-Item $checksumFile -Force -ErrorAction SilentlyContinue
-          foreach ($installer in Get-ChildItem ./artifacts/Setup*.exe -File) {
-            $hash = (Get-FileHash $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-            "$hash  $($installer.Name)" | Out-File $checksumFile -Append -Encoding utf8
+          $executables = @(Get-ChildItem ./artifacts/*.exe -File | Sort-Object Name)
+          if ($executables.Count -ne 2) { throw "Expected two executables to checksum, found $($executables.Count)" }
+          foreach ($executable in $executables) {
+            $hash = (Get-FileHash $executable.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($executable.Name)" | Out-File $checksumFile -Append -Encoding utf8
           }
-          if (-not (Test-Path $checksumFile)) { throw "Checksums were not produced" }
+          Get-Content $checksumFile
 
-      - name: Attach to release
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: app-${{ steps.artifacts.outputs.version }}
+          target_commitish: master
+          name: "Яндекс Музыка ${{ steps.artifacts.outputs.version }} — Yandex Music Mod"
+          body: |
+            Проверенная релизная сборка Yandex Music Mod поверх стабильной версии Яндекс Музыки.
+
+            - Версия приложения: **${{ steps.artifacts.outputs.version }}**
+            - `Setup.${{ steps.artifacts.outputs.version }}.exe` — установщик Windows
+            - `Portable.${{ steps.artifacts.outputs.version }}.exe` — переносимая версия без установки
+            - `SHASUMS256.txt` — контрольные суммы SHA-256
           files: |
-            artifacts/Setup*.exe
+            artifacts/Setup.${{ steps.artifacts.outputs.version }}.exe
+            artifacts/Portable.${{ steps.artifacts.outputs.version }}.exe
             artifacts/SHASUMS256.txt
+          fail_on_unmatched_files: true
+          overwrite_files: true
+          make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Remove stale release assets and verify publication
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = "${{ steps.artifacts.outputs.version }}"
+          $tag = "app-$version"
+          $allowed = @("Setup.$version.exe", "Portable.$version.exe", "SHASUMS256.txt")
+          $release = gh release view $tag --repo Golopmoui3/YandexMusicBetaMod --json assets | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "Unable to read release $tag" }
+
+          foreach ($asset in $release.assets) {
+            if ($allowed -notcontains $asset.name) {
+              gh release delete-asset $tag $asset.name --repo Golopmoui3/YandexMusicBetaMod --yes
+              if ($LASTEXITCODE -ne 0) { throw "Unable to remove stale asset $($asset.name)" }
+            }
+          }
+
+          $published = (gh release view $tag --repo Golopmoui3/YandexMusicBetaMod --json assets | ConvertFrom-Json).assets.name
+          foreach ($name in $allowed) {
+            if ($published -notcontains $name) { throw "Release asset is missing: $name" }
+          }
+          if (@($published).Count -ne $allowed.Count) {
+            throw "Unexpected release assets remain: $($published -join ', ')"
+          }
+          "Published assets: $($published -join ', ')"

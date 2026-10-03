@@ -3,6 +3,9 @@
   "module": "index.ts",
   "type": "module",
   "private": true,
+  "trustedDependencies": [
+    "ffmpeg-static"
+  ],
   "scripts": {
     "start": "bun ./src/patcher/index.ts",
     "ui:dev": "bun ./scripts/debug-copy-ui.js",

@@ -77,6 +77,9 @@
       },
     },
   },
+  "trustedDependencies": [
+    "ffmpeg-static",
+  ],
   "packages": {
     "7zip-bin": ["7zip-bin@5.1.1", "", {}, "sha512-sAP4LldeWNz0lNzmTird3uWfFDWWTeg6V/MsmyyLR9X1idwKBWIgt/ZvinqQldJm3LecKEs1emkbquO6PCiLVQ=="],
 

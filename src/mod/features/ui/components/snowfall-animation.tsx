@@ -73,8 +73,6 @@ export function NewYearSnowfallAnimation() {
 }
 
 export function NewYearSnowfall() {
-  if (!getIsNewYear()) return null;
-
   const [snowfallEnabled, setSnowfallEnabled] = useState(false);
 
   useEffect(() => {
@@ -84,6 +82,8 @@ export function NewYearSnowfall() {
       setSnowfallEnabled(snowfallEnabled || false);
     })();
   }, []);
+
+  if (!getIsNewYear()) return null;
 
   return (
     <ExpandableCard title="Падающий снежок" icon={<Snowflake className="h-4 w-4" />}>

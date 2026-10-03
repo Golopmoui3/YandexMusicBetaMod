@@ -46,9 +46,20 @@ export async function processBuild(build: AppBuild): Promise<string[]> {
     replacement: string,
     label: string,
   ): string => {
-    const found = typeof pattern === "string" ? contents.includes(pattern) : pattern.test(contents);
-    if (!found) fail(`Patch target not found: ${label}`);
-    return contents.replace(pattern, replacement);
+    if (typeof pattern === "string") {
+      const stringMatchCount = contents.split(pattern).length - 1;
+      if (stringMatchCount === 0) fail(`Patch target not found: ${label}`);
+      if (stringMatchCount > 1) fail(`Expected a single patch target for ${label}, found ${stringMatchCount}`);
+      return contents.replaceAll(pattern, replacement);
+    }
+    const globalPattern = new RegExp(
+      pattern.source,
+      pattern.flags.includes("g") ? pattern.flags : pattern.flags + "g",
+    );
+    const matchCount = (contents.match(globalPattern) || []).length;
+    if (matchCount === 0) fail(`Patch target not found: ${label}`);
+    if (matchCount > 1) fail(`Expected a single patch target for ${label}, found ${matchCount}`);
+    return contents.replace(globalPattern, replacement);
   };
 
   fs.rmSync(buildDir, { recursive: true, force: true });
@@ -122,7 +133,7 @@ export async function processBuild(build: AppBuild): Promise<string[]> {
       for (const quote of ["'", '"']) {
         source = source.replaceAll(
           `require(${quote}@yandex-music-int/${moduleName}${quote})`,
-          `/* yandexMusicMod: private module stub */ ((() => { const noop = () => {}; return new Proxy({}, { get: () => noop, apply: () => undefined }); })()) /* @yandex-music-int/${moduleName} */`,
+          `/* yandexMusicMod: private module stub */ ((() => { const makeStub = () => { const fn = function stub() {}; return new Proxy(fn, { get: (target, prop) => { if (prop === "prototype") return target.prototype; if (prop === "then" || prop === "catch" || prop === "finally") return undefined; return makeStub(); }, apply: () => undefined, construct: () => ({}) }); }; return makeStub(); })()) /* @yandex-music-int/${moduleName} */`,
         );
       }
     }
@@ -173,6 +184,7 @@ export async function processBuild(build: AppBuild): Promise<string[]> {
     },
     linux: { icon: "assets/icon.png" },
     extraResources: [{ from: "assets/", to: "assets/", filter: ["**/*"] }],
+    asarUnpack: ["**/node_modules/ffmpeg-static/**"],
   };
 
   const rootPackageJson = JSON.parse(fs.readFileSync(path.join(projectRoot, "package.json"), "utf8"));
@@ -252,7 +264,8 @@ export async function processBuild(build: AppBuild): Promise<string[]> {
     "https://strm.yandex.ru/ping",
     "https://yandex.ru/an/*",
   ];
-  const browserWindowMarker = "const window = new electron.BrowserWindow({";
+  const browserWindowMarker = `const window = new electron.BrowserWindow({
+ show: true`;
   const browserWindowStart = indexJsContents.indexOf(browserWindowMarker);
   const returnWindowIndex = indexJsContents.indexOf("return window", browserWindowStart);
   if (browserWindowStart < 0 || returnWindowIndex < 0) fail("Main BrowserWindow return point was not found");

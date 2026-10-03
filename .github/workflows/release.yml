@@ -165,6 +165,8 @@ jobs:
           git config user.name "Golopmoui3"
           git config user.email "Golopmoui3@users.noreply.github.com"
           git add LAST_BUILD_VERSION .meta/meta.json
-          git commit -m "chore: publish mod $MOD_VERSION for Yandex Music $APP_VERSION [skip ci]" || exit 0
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: publish mod $MOD_VERSION for Yandex Music $APP_VERSION [skip ci]"
+          fi
           git pull --rebase origin master
           git push origin HEAD:master

@@ -6,18 +6,27 @@ const { execFile } = require("child_process");
 const sanitize = require("sanitize-filename");
 const axios = require("axios");
 
-const ffmpegBinary = require("ffmpeg-static");
-if (typeof ffmpegBinary !== "string" || ffmpegBinary.length === 0) {
-  throw new Error("ffmpeg-static did not provide a binary for this platform");
+let pathToFfmpeg = null;
+try {
+  const ffmpegBinary = require("ffmpeg-static");
+  if (typeof ffmpegBinary !== "string" || ffmpegBinary.length === 0) {
+    throw new Error("ffmpeg-static did not provide a binary for this platform");
+  }
+  pathToFfmpeg = ffmpegBinary.replaceAll("app.asar", "app.asar.unpacked");
+} catch (error) {
+  console.error("[yandexMusicMod] ffmpeg-static init failed, track downloads will be disabled:", error);
 }
-const pathToFfmpeg = ffmpegBinary.replaceAll("app.asar", "app.asar.unpacked");
 const appFolder = electron.app.getPath("userData");
 const settingsFilePath = path.join(appFolder, "mod_settings.json");
 const defaultDownloadPath = path.join(appFolder, "Downloads");
 const MAX_SETTING_VALUE_BYTES = 25 * 1024 * 1024;
 const FORBIDDEN_SETTING_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
-fs.mkdirSync(defaultDownloadPath, { recursive: true });
+try {
+  fs.mkdirSync(defaultDownloadPath, { recursive: true });
+} catch (error) {
+  console.error("[yandexMusicMod] Failed to create download directory:", error);
+}
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
@@ -52,7 +61,11 @@ function validateSettingValue(value) {
 
 const initialSettings = readSettings();
 if (!initialSettings.downloadFolderPath) initialSettings.downloadFolderPath = defaultDownloadPath;
-writeSettings(initialSettings);
+try {
+  writeSettings(initialSettings);
+} catch (error) {
+  console.error("[yandexMusicMod] Failed to initialize settings file:", error);
+}
 
 function isAllowedYandexHost(hostname) {
   const host = hostname.toLowerCase();
@@ -129,6 +142,7 @@ electron.ipcMain.handle("yandexMusicMod.downloadTrack", async (_event, downloadI
   let trackCoverPath = null;
 
   try {
+    if (!pathToFfmpeg) return { ok: false, error: "ffmpeg is unavailable in this build" };
     if (!downloadInfo || typeof downloadInfo !== "object") throw new TypeError("Invalid download info");
     if (!trackMeta || typeof trackMeta !== "object") throw new TypeError("Invalid track metadata");
     if (typeof downloadInfo.key !== "string" || typeof downloadInfo.codec !== "string") {
@@ -148,7 +162,8 @@ electron.ipcMain.handle("yandexMusicMod.downloadTrack", async (_event, downloadI
     const fallbackName = `track-${String(trackMeta.id || Date.now())}`;
     const trackFileName =
       sanitize(`${artists.join(", ")} - ${title}${version ? ` ${version}` : ""}`).trim().slice(0, 180) || fallbackName;
-    const fileExtension = downloadInfo.codec.toLowerCase().includes("flac") ? "flac" : "mp3";
+    const codec = downloadInfo.codec.toLowerCase();
+    const fileExtension = codec.includes("flac") ? "flac" : codec.includes("mp3") ? "mp3" : "m4a";
     const trackFilePath = path.join(saveFolder, `${trackFileName}.${fileExtension}`);
     trackTempFilePath = path.join(saveFolder, `.${randomUUID()}.${fileExtension}`);
     trackCoverPath = path.join(saveFolder, `.${randomUUID()}.jpg`);
@@ -163,7 +178,7 @@ electron.ipcMain.handle("yandexMusicMod.downloadTrack", async (_event, downloadI
 
     const decryptedData = await decryptYandexAudio(response.data, downloadInfo.key);
     await fs.promises.writeFile(trackFilePath, Buffer.from(decryptedData));
-    await runFfmpeg(["-hide_banner", "-loglevel", "error", "-i", trackFilePath, "-y", trackTempFilePath]);
+    await runFfmpeg(["-hide_banner", "-loglevel", "error", "-i", trackFilePath, "-c", "copy", "-y", trackTempFilePath]);
 
     const ffmpegArgs = ["-hide_banner", "-loglevel", "error", "-i", trackTempFilePath];
     let hasCover = false;

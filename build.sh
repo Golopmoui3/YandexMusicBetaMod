@@ -39,8 +39,9 @@ fi
 echo "[2/5] Декомпиляция apktool"
 java -jar "$APKTOOL_JAR" d -f -o "$WORK/src" "$WORK/merged.apk"
 
-echo "[3/5] Наложение smali-патчей из patches/ (6 файлов)"
+echo "[3/5] Наложение патчей (6 smali-файлов + minSdk 26)"
 cp -rv patches/. "$WORK/src/"
+sed -i 's/minSdkVersion: [0-9]*/minSdkVersion: 26/' "$WORK/src/apktool.yml"
 
 echo "[4/5] Сборка apktool"
 java -jar "$APKTOOL_JAR" b -o "$WORK/unsigned.apk" "$WORK/src"

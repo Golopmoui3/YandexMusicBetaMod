@@ -81,4 +81,4 @@ SHA-256: 0103fab0aac96301094f41fbd058555cf1755ab9dea65063feebbb0f109683b5
 
 Всё это автоматизирует `./build.sh`; готовый APK лежит на странице [Releases](../../releases).
 
-SHA-256 текущего APK: `79b05da827d4d99c76234a716e30ddfeec27f1fd4369be14c1340bf7d6d31ef6`
+SHA-256 текущего APK: `ff86a0c1e9971cd55622682d7dccad96bdbd8a6133d0506d2e7eae9a85a77bc8`

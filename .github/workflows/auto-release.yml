@@ -49,7 +49,7 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
-  build:
+  build-windows:
     needs: check
     if: needs.check.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
@@ -90,18 +90,85 @@ jobs:
           Copy-Item $portables[0].FullName -Destination $out -Force
           Get-ChildItem $out | Format-Table Name, Length
 
-      - name: Create SHA-256 checksums
-        shell: pwsh
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-artifacts
+          path: artifacts/
+
+  build-macos:
+    needs: check
+    if: needs.check.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Type-check sources
+        run: bun run typecheck
+
+      - name: Build macOS DMG and ZIP
+        env:
+          VITE_MOD_VERSION: ${{ needs.check.outputs.mod_version }}
+        run: bun start
+
+      - name: Collect and validate release artifacts
+        shell: bash
         run: |
-          $checksumFile = "./artifacts/SHASUMS256.txt"
-          Remove-Item $checksumFile -Force -ErrorAction SilentlyContinue
-          $executables = @(Get-ChildItem ./artifacts/*.exe -File | Sort-Object Name)
-          if ($executables.Count -ne 2) { throw "Expected two executables to checksum, found $($executables.Count)" }
-          foreach ($executable in $executables) {
-            $hash = (Get-FileHash $executable.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-            "$hash  $($executable.Name)" | Out-File $checksumFile -Append -Encoding utf8
-          }
-          Get-Content $checksumFile
+          set -euo pipefail
+          out="$GITHUB_WORKSPACE/artifacts"
+          mkdir -p "$out"
+
+          find .versions/*/mod/dist -maxdepth 1 -type f \( -name "*.dmg" -o -name "*.zip" \) -exec cp -v {} "$out/" \;
+
+          ls -lh "$out"
+          dmg_count=$(find "$out" -maxdepth 1 -name "*.dmg" | wc -l)
+          zip_count=$(find "$out" -maxdepth 1 -name "*.zip" | wc -l)
+          if [ "$dmg_count" -lt 1 ] || [ "$zip_count" -lt 1 ]; then
+            echo "Expected at least one DMG and one ZIP file, found DMG: $dmg_count, ZIP: $zip_count"
+            exit 1
+          fi
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-artifacts
+          path: artifacts/
+
+  publish-release:
+    needs: [check, build-windows, build-macos]
+    if: needs.check.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-artifacts
+          path: artifacts/
+
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-artifacts
+          path: artifacts/
+
+      - name: Create SHA-256 checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd artifacts
+          rm -f SHASUMS256.txt
+          sha256sum * > SHASUMS256.txt
+          cat SHASUMS256.txt
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
@@ -114,45 +181,15 @@ jobs:
 
             - Версия мода: **${{ needs.check.outputs.mod_version }}**
             - Версия приложения: **${{ needs.check.outputs.version }}**
-            - `Setup.${{ needs.check.outputs.version }}.exe` — установщик Windows
-            - `Portable.${{ needs.check.outputs.version }}.exe` — переносимая версия без установки
+            - **Windows**: `Setup.${{ needs.check.outputs.version }}.exe` (установщик), `Portable.${{ needs.check.outputs.version }}.exe` (портативная)
+            - **macOS**: `Яндекс Музыка-${{ needs.check.outputs.version }}.dmg` (установочный образ), `YandexMusicMod-${{ needs.check.outputs.version }}-mac.zip`
             - `SHASUMS256.txt` — контрольные суммы SHA-256
-          files: |
-            artifacts/Setup.${{ needs.check.outputs.version }}.exe
-            artifacts/Portable.${{ needs.check.outputs.version }}.exe
-            artifacts/SHASUMS256.txt
+          files: artifacts/*
           fail_on_unmatched_files: true
           overwrite_files: true
           make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Remove stale release assets and verify publication
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          $appVersion = "${{ needs.check.outputs.version }}"
-          $tag = "app-${{ needs.check.outputs.mod_version }}"
-          $allowed = @("Setup.$appVersion.exe", "Portable.$appVersion.exe", "SHASUMS256.txt")
-          $release = gh release view $tag --repo Golopmoui3/YandexMusicBetaMod --json assets | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0) { throw "Unable to read release $tag" }
-
-          foreach ($asset in $release.assets) {
-            if ($allowed -notcontains $asset.name) {
-              gh release delete-asset $tag $asset.name --repo Golopmoui3/YandexMusicBetaMod --yes
-              if ($LASTEXITCODE -ne 0) { throw "Unable to remove stale asset $($asset.name)" }
-            }
-          }
-
-          $published = (gh release view $tag --repo Golopmoui3/YandexMusicBetaMod --json assets | ConvertFrom-Json).assets.name
-          foreach ($name in $allowed) {
-            if ($published -notcontains $name) { throw "Release asset is missing: $name" }
-          }
-          if (@($published).Count -ne $allowed.Count) {
-            throw "Unexpected release assets remain: $($published -join ', ')"
-          }
-          "Published assets: $($published -join ', ')"
 
       - name: Record successful release
         shell: bash

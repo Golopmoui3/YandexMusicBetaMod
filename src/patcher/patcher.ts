@@ -97,6 +97,10 @@ export async function processBuild(build: AppBuild): Promise<string[]> {
     requireFile(appIconPath, "Application icon");
     fs.copyFileSync(appIconPath, path.join(assetsDir, "icon.ico"));
     fs.copyFileSync(path.join(projectRoot, "yaicon.png"), path.join(assetsDir, "icon.png"));
+    const yaiconIcns = path.join(projectRoot, "yaicon.icns");
+    if (fs.existsSync(yaiconIcns)) {
+      fs.copyFileSync(yaiconIcns, path.join(assetsDir, "icon.icns"));
+    }
   } catch (error) {
     fail(`Failed to prepare app icons: ${errorMessage(error)}`);
   }
@@ -183,6 +187,12 @@ export async function processBuild(build: AppBuild): Promise<string[]> {
       requestExecutionLevel: "user",
     },
     linux: { icon: "assets/icon.png" },
+    mac: {
+      icon: "assets/icon.icns",
+      target: ["dmg", "dir"],
+      category: "public.app-category.music",
+      identity: null,
+    },
     extraResources: [{ from: "assets/", to: "assets/", filter: ["**/*"] }],
     asarUnpack: ["**/node_modules/ffmpeg-static/**"],
   };
@@ -381,13 +391,34 @@ export async function processBuild(build: AppBuild): Promise<string[]> {
   logProgress("🛠️  Building modded application");
   await $`bun install`.cwd(buildModdedDir);
   await applyWincodesignWorkaround();
-  await $`bunx electron-builder --publish never`.cwd(buildModdedDir);
 
-  const setupPath = path.join(buildModdedDir, "dist", `Setup.${build.version}.exe`);
-  const portablePath = path.join(buildModdedDir, "dist", `Portable.${build.version}.exe`);
-  requireFile(setupPath, "Setup executable");
-  requireFile(portablePath, "Portable executable");
-  logProgress(`✔️   Produced ${path.basename(setupPath)} and ${path.basename(portablePath)}`);
+  if (process.platform === "darwin") {
+    await $`CSC_IDENTITY_AUTO_DISCOVERY=false bunx electron-builder --mac --publish never`.cwd(buildModdedDir);
+    const distDir = path.join(buildModdedDir, "dist");
+    const macDir = path.join(distDir, "mac");
+    if (fs.existsSync(macDir)) {
+      const appFile = fs.readdirSync(macDir).find((f) => f.endsWith(".app"));
+      if (appFile) {
+        const appPath = path.join(macDir, appFile);
+        const zipPath = path.join(distDir, `YandexMusicMod-${build.version}-mac.zip`);
+        logProgress(`📦 Packaging ${appFile} into ${path.basename(zipPath)}`);
+        await $`ditto -c -k --sequesterRsrc --keepParent ${appPath} ${zipPath}`;
+      }
+    }
+    const macArtifacts = fs.readdirSync(distDir).filter(
+      (file) => file.endsWith(".dmg") || file.endsWith(".zip") || file.endsWith(".app"),
+    );
+    if (macArtifacts.length === 0) fail("No macOS artifacts were produced in dist");
+    logProgress(`✔️   Produced macOS artifacts: ${macArtifacts.join(", ")}`);
+  } else {
+    await $`bunx electron-builder --publish never`.cwd(buildModdedDir);
+
+    const setupPath = path.join(buildModdedDir, "dist", `Setup.${build.version}.exe`);
+    const portablePath = path.join(buildModdedDir, "dist", `Portable.${build.version}.exe`);
+    requireFile(setupPath, "Setup executable");
+    requireFile(portablePath, "Portable executable");
+    logProgress(`✔️   Produced ${path.basename(setupPath)} and ${path.basename(portablePath)}`);
+  }
 
   return progress;
 }

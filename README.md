@@ -69,7 +69,7 @@
 
 ### 🤖 Автосборка релизов (v2.9.1)
 
-Workflow `.github/workflows/release.yml`: на каждый тег `v*` (или вручную через workflow_dispatch) на GitHub Actions поднимается `windows-latest`, выполняется полный пайплайн (`bun start` — скачивание, патч, сборка), а готовый установщик + SHA256-чекуммы автоматически прикладываются к релизу. Сборка больше не требует локальной машины.
+Workflow `.github/workflows/release.yml` и `.github/workflows/auto-release.yml`: на каждое обновление Яндекс Музыки (или вручную через workflow_dispatch) на GitHub Actions параллельно запускаются раннеры `windows-latest` и `macos-latest`. Выполняется полный пайплайн сборки (`bun start`), а готовые установщики для Windows (`Setup.exe`, `Portable.exe`), macOS (`.dmg`, `.zip`) и SHA256-чексуммы автоматически прикладываются к релизу.
 
 ### ⚙️ Добавлен workaround для сборки на Windows без админских прав
 
